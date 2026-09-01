@@ -170,3 +170,26 @@ python3 run_all.py                     # 无参数 → 交互模式
 - 输出 `results/<证书名>/<证书名>_report.xlsx`，共 5 个 sheet：`zlint` / `组织名` / `SCT时间` / `OCSP查询` / `汇总`
 - `汇总` sheet 统一为三列 `type / 内容 / status`：zlint 行（内容=规则名，status=规则状态）、组织名行（status=组织名）、SCT时间行（内容=时间戳）、OCSP查询行（status=状态）
 - 依赖：`pip install cryptography openpyxl`（xlsx 需要 openpyxl）
+
+批量输出结构（每个证书一个子目录，含 xlsx 大表和 lint 的 JSON/CSV/JSONL）：
+
+```text
+results/
+└── baidu/
+    ├── baidu_report.xlsx      # 5 个 sheet：zlint / 组织名 / SCT时间 / OCSP查询 / 汇总
+    ├── baidu.csv              # zlint 全规则 CSV（433 行）
+    ├── baidu.json / .jsonl    # zlint 全规则 JSON / JSONL
+    └── results_summary.csv    # run_batch.sh 的汇总 CSV
+```
+
+`汇总` sheet 示例（表头 `type / 内容 / status`，zlint 规则在前，其余三类在后）：
+
+```text
+type       内容                                    status
+CA         e_aia_ca_issuers_must_have_http_only    pass
+CA         e_adobe_extensions_legacy_multipurpose  NA
+...
+组织名      (空)                                    Beijing Baidu Netcom Science Technology Co., Ltd.
+SCT时间    Jul 09 02:33:07.208000 2026 GMT         (空)
+OCSP查询   (空)                                    GOOD
+```
