@@ -11,6 +11,7 @@ __pycache__/
 
 # 批量运行输出目录
 /results/
+/results_crl/
 /extracted/
 
 # 证书样例目录
