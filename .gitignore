@@ -1,2 +1,15 @@
 # 编译产物
 /zlint-all-lints
+/extract-cert
+
+# 运行产物（单证书输出）
+/lint_results.json
+/lint_results.csv
+/cert_info.json
+
+# 批量运行输出目录
+/results/
+/extracted/
+
+# 证书样例目录
+/certs/

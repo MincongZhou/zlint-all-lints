@@ -23,10 +23,15 @@ go build -o zlint-all-lints .
 ## 使用 / Usage
 
 ```bash
-./zlint-all-lints -cert <cert.pem|cert.der> [-out result.json] [-pretty=false]
+./zlint-all-lints -cert <cert.pem|cert.der> [-out results.json] [-csv results.csv] [-pretty=false]
 ```
 
 支持 PEM 与 DER 格式的证书。不指定 `-out` 时默认写入 `lint_results.json`。
+指定 `-csv` 时，会在 JSON 之外**再生成一份同结构的 CSV**，方便在 Excel / WPS 里筛选排序：
+
+```bash
+./zlint-all-lints -cert cert.pem -out results.json -csv results.csv
+```
 
 ## 输出示例 / Output sample
 
@@ -52,4 +57,38 @@ go build -o zlint-all-lints .
 }
 ```
 
+### CSV 输出示例 / CSV output sample
+
+```csv
+name,type,description,citation,source,status,details
+e_adobe_extensions_legacy_multipurpose_criticality,CA,"If present, ...",7.1.2.3.m,CABF_SMIME_BR,NA,
+e_basic_cons_not_critical,CA,"The BasicConstraints extension MUST be marked critical in CA certificates.",BRs: 7.1.2.7.8,CABF_BR,error,"BasicConstraints not marked critical"
+```
+
 `status` 取值：`pass` / `error` / `warn` / `info` / `NA`（不适用）/ `NE`（未生效）。
+
+## 批量跑证书 / Batch run
+
+`run_batch.sh` 遍历一个目录下的所有证书，每个证书输出一份 JSON + 一份 CSV，并汇总成带证书名的总 CSV：
+
+```bash
+./run_batch.sh <证书目录> [输出目录]   # 输出目录默认 ./results
+```
+
+例：
+
+```bash
+mkdir certs && cp ../zlint/v3/testdata/27monthsEv.pem certs/
+./run_batch.sh certs results
+```
+
+产物：
+
+```text
+results/
+├── 27monthsEv.csv            # 单证书 CSV（433 行）
+├── 27monthsEv.json           # 单证书 JSON
+└── results_summary.csv       # 汇总：全部证书 × 全部规则，首列 cert 为证书文件名
+```
+
+汇总 CSV 表头比单证书多一列 `cert`，可直接在 Excel 里按证书、按 `status`、按 `type` 透视筛选。

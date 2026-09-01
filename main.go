@@ -10,6 +10,7 @@
 package main
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"encoding/pem"
 	"flag"
@@ -64,11 +65,12 @@ type output struct {
 func main() {
 	certPath := flag.String("cert", "", "path to a certificate file (PEM or DER)")
 	outPath := flag.String("out", "lint_results.json", "path to the output JSON file")
+	csvPath := flag.String("csv", "", "path to the output CSV file (optional, empty = no CSV)")
 	pretty := flag.Bool("pretty", true, "pretty-print the output JSON")
 	flag.Parse()
 
 	if *certPath == "" {
-		fmt.Fprintln(os.Stderr, "usage: zlint-all-lints -cert <cert.pem|cert.der> [-out results.json] [-pretty=false]")
+		fmt.Fprintln(os.Stderr, "usage: zlint-all-lints -cert <cert.pem|cert.der> [-out results.json] [-csv results.csv] [-pretty=false]")
 		os.Exit(1)
 	}
 
@@ -161,6 +163,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 依据同样的 lint 结果，再输出一份 CSV。
+	if *csvPath != "" {
+		if err := writeCSV(*csvPath, entries); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to write %q: %v\n", *csvPath, err)
+			os.Exit(1)
+		}
+		fmt.Printf("output written to %s\n", *csvPath)
+	}
+
 	// 控制台摘要。
 	fmt.Printf("total lints: %d (CA=%d, CRL=%d, OCSP=%d)\n",
 		len(entries), counts[typeCA], counts[typeCRL], counts[typeOCSP])
@@ -193,6 +204,36 @@ func parseCertificate(path string) *x509.Certificate {
 		os.Exit(1)
 	}
 	return cert
+}
+
+// writeCSV 将全部 lint 结果写为 CSV，列结构与 JSON 的 lintEntry 字段一一对应。
+func writeCSV(path string, entries []lintEntry) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	w := csv.NewWriter(f)
+	defer w.Flush()
+
+	if err := w.Write([]string{"name", "type", "description", "citation", "source", "status", "details"}); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := w.Write([]string{
+			e.Name,
+			string(e.Type),
+			e.Description,
+			e.Citation,
+			e.Source,
+			e.Status,
+			e.Details,
+		}); err != nil {
+			return err
+		}
+	}
+	return w.Error()
 }
 
 // statusCount 统计 ResultSet 中指定状态的证书类 lint 数量。
