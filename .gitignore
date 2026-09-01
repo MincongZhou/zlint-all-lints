@@ -1,6 +1,8 @@
 # 编译产物
 /zlint-all-lints
 /extract-cert
+__pycache__/
+*.pyc
 
 # 运行产物（单证书输出）
 /lint_results.json
