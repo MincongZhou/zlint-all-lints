@@ -171,6 +171,20 @@ python3 run_all.py                     # 无参数 → 交互模式
 - `汇总` sheet 统一为三列 `type / 内容 / status`：zlint 行（内容=规则名，status=规则状态）、组织名行（status=组织名）、SCT时间行（内容=时间戳）、OCSP查询行（status=状态）
 - 依赖：`pip install cryptography openpyxl`（xlsx 需要 openpyxl）
 
+`run_all.py` 结构（输入 → 4 个脚本 → 5 个 sheet → xlsx）：
+
+```text
+<证书路径|证书目录>              # 无参数 → 交互模式 interactive()
+│
+├── run_zlint.py   ──→ sheet「zlint」    zlint 全部规则（name/type/description/.../status）
+├── extract_org.py ──→ sheet「组织名」    type / subject / 组织名
+├── extract_sct.py ──→ sheet「SCT时间」   type / 序号 / timestamp_utc / epoch_ms / log_id / version
+├── check_ocsp.py  ──→ sheet「OCSP查询」  type / 状态 / 详情
+│
+└── build_master() ──→ sheet「汇总」      type / 内容 / status 三列（四表合一）
+    └── write_xlsx() → <证书名>_report.xlsx（以上 5 个 sheet）
+```
+
 批量输出结构（每个证书一个子目录，含 xlsx 大表和 lint 的 JSON/CSV/JSONL）：
 
 ```text
