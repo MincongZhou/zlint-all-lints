@@ -273,3 +273,16 @@ python3 extract_CertInfo_python/extract_sct.py cert.der --der  # DER
 python3 extract_CertInfo_python/extract_org.py cert.pem        # 输出 subject 与组织名（O 字段）
 python3 extract_CertInfo_python/openssl_script.py              # 交互式：openssl 提取字段
 ```
+
+### 11.5 一键跑完 4 个分析脚本（run_all.py / run_all.sh）
+
+对单张证书依次跑 `run_zlint.py` + `extract_org.py` + `extract_sct.py` + `check_ocsp.py`，`run_all.py` 还会汇总成 xlsx 大表：
+
+```bash
+./run_all.sh certs/baidu.pem                      # shell 版，只打印各脚本结果
+python3 run_all.py certs/baidu.pem                # Python 版，生成 baidu_report.xlsx
+python3 run_all.py certs                          # 批量跑 certs 下所有证书
+python3 run_all.py                                # 无参数 → 交互模式
+```
+
+xlsx 共 5 个 sheet（zlint / 组织名 / SCT时间 / OCSP查询 / 汇总），`汇总` sheet 统一三列 `type / 内容 / status`。需要 `pip install cryptography openpyxl`。

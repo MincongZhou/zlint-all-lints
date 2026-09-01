@@ -155,3 +155,18 @@ python3 run_zlint.py                            # 无参数 → 交互模式
 | `openssl_script.py` | 调用 `openssl x509` 提取 subject / issuer / 有效期 | 交互输入证书路径 |
 
 > 提示：`extract_sct.py` 需要 `cryptography >= 42.0`（原生支持 CT Precertificate SCTs 扩展解析）。
+
+### run_all.sh / run_all.py —— 一键跑完 4 个分析脚本
+
+对单张证书依次跑完 `run_zlint.py`（zlint 全部规则）+ `extract_org.py`（组织名）+ `extract_sct.py`（SCT 时间）+ `check_ocsp.py`（OCSP 状态）：
+
+```bash
+./run_all.sh <证书路径> [输出目录]     # shell 版：只打印各脚本结果
+python3 run_all.py <证书路径|证书目录> [输出目录]   # Python 版：额外汇总成 xlsx 大表
+python3 run_all.py                     # 无参数 → 交互模式
+```
+
+- `run_all.py` 传**目录**则批量跑其中所有证书（递归查找 `.pem/.crt/.cer/.der`），每张证书一个子目录
+- 输出 `results/<证书名>/<证书名>_report.xlsx`，共 5 个 sheet：`zlint` / `组织名` / `SCT时间` / `OCSP查询` / `汇总`
+- `汇总` sheet 统一为三列 `type / 内容 / status`：zlint 行（内容=规则名，status=规则状态）、组织名行（status=组织名）、SCT时间行（内容=时间戳）、OCSP查询行（status=状态）
+- 依赖：`pip install cryptography openpyxl`（xlsx 需要 openpyxl）
