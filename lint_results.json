@@ -1,6 +1,7 @@
 {
   "meta": {
-    "input_file": "../zlint/v3/testdata/27monthsEv.pem",
+    "input_file": "certs/27monthsEv.pem",
+    "input_type": "cert",
     "subject": "C=DE, O=Lint, CN=27 months",
     "total_lints": 433,
     "type_counts": {
