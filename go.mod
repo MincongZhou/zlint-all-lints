@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/zmap/zcrypto v0.0.0-20260514033604-a1159eb3cad9
-	github.com/zmap/zlint/v3 v3.0.0
+	github.com/zmap/zlint/v3 v3.7.1
 	golang.org/x/crypto v0.52.0
 )
 
