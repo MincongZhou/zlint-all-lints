@@ -130,19 +130,50 @@ results/
 **`check_ocsp.py`**：联网查询证书的 OCSP 状态（GOOD / REVOKED / UNKNOWN）
 
 ```bash
-python3 check_ocsp.py <证书路径> [签发者证书路径] [--der] [--timeout 秒]
+python3 check_ocsp.py <证书路径> [签发者证书路径] [--der] [--timeout 秒] [--respout 文件]
 python3 check_ocsp.py <证书路径> --status     # 只输出状态，适合脚本调用
 python3 check_ocsp.py                          # 无参数 → 交互模式
 ```
 
 - 从 AIA 扩展自动提取 OCSP URL；签发者证书可本地传入，否则从 CA Issuers 地址自动下载
 - http 请求失败自动兜底 https、自动重试
+- 证书/签发者证书 PEM/DER 自动识别，`--der` 只表示优先按 DER 解析，标错也会自动回退
+- `--respout <文件>`：把 responder 返回的**原始 OCSP 响应(DER)** 保存到文件，供 zlint 跑 OCSP 规则：`zlint -format der -longSummary resp.der`（或 `./zlint-all-lints -cert resp.der`）
 - `--status` 模式：stdout 只输出 `GOOD` / `REVOKED`（带吊销时间）/ `UNKNOWN`，错误走 stderr + 非零退出码，便于管道和脚本化调用
 
-**`run_zlint.py`**：`run_batch.sh` 的 Python 封装（支持证书/CRL/OCSP 目录），支持交互模式与 `--jsonl` 转换
+**`check_crl.py`**：从证书 CDP（CRL Distribution Points）扩展下载 CRL，DER/PEM 自动识别并统一转成 PEM，供 zlint 跑 18 条 CRL 规则
 
 ```bash
-python3 run_zlint.py <对象目录> [输出目录] [--timeout 秒] [--jsonl]
+python3 check_crl.py <证书路径> [--timeout 秒] [--out 输出.pem]
+python3 check_crl.py                            # 无参数 → 交互模式
+./zlint-all-lints -cert crl.pem                # 拿到 crl.pem 后直接喂 zlint
+```
+
+- 自动遍历证书 CDP 里的全部 http(s) 分发点，逐个尝试直到下载成功
+- 下载内容会校验确实是 CRL（防 HTML 错误页/误传证书）
+
+**`crl_sourcedata.py`**：解析 CRL 的吊销条目（序列号 16/10 进制 + 吊销时间 + 原因码），支持单文件或目录批量，可导出 CSV 汇总
+
+```bash
+python3 crl_sourcedata.py <crl 文件|目录> ... [--csv 输出.csv]
+python3 crl_sourcedata.py crl.pem                      # 终端逐行输出序列号
+python3 crl_sourcedata.py crls/ --csv revoked.csv      # 批量导出（含吊销时间/原因）
+```
+
+- CRL 里只有吊销**序列号**（+吊销时间+原因码），不含证书本体；如需"哪张证书被吊销"，拿序列号去本地证书池反查
+- 与 `check_crl.py` 组合，下载 + 解析一条龙：
+
+```bash
+python3 check_crl.py certs/baidu.pem --out crl.pem \
+  && python3 crl_sourcedata.py crl.pem --csv baidu_revoked.csv
+```
+
+**`run_zlint.py`**：`run_batch.sh` 的 Python 封装（支持证书/CRL/OCSP 的**目录或单个文件**），支持交互模式与 `--jsonl` 转换
+
+```bash
+python3 run_zlint.py <对象目录|文件> [输出目录] [--timeout 秒] [--jsonl]
+python3 run_zlint.py certs/baidu.pem results/    # 单文件：自动临时目录，跑完清理
+python3 run_zlint.py certs                        # 目录：批量遍历
 python3 run_zlint.py                            # 无参数 → 交互模式
 ```
 
@@ -170,6 +201,22 @@ python3 run_all.py                     # 无参数 → 交互模式
 - 输出 `results/<证书名>/<证书名>_report.xlsx`，共 5 个 sheet：`zlint` / `组织名` / `SCT时间` / `OCSP查询` / `汇总`
 - `汇总` sheet 统一为三列 `type / 内容 / status`：zlint 行（内容=规则名，status=规则状态）、组织名行（status=组织名）、SCT时间行（内容=时间戳）、OCSP查询行（status=状态）
 - 依赖：`pip install cryptography openpyxl`（xlsx 需要 openpyxl）
+
+### run_cert_crl_ocsp.py —— 对一张证书跑齐 CA / CRL / OCSP 三类规则
+
+zlint 对单个输入对象只真实执行其所属类型的规则（证书→CA 414 条、CRL→18 条、OCSP→1 条），其余标 `NA`。本脚本把证书的**配套吊销对象**也取下来一起跑，三类规则全部真实执行：
+
+```bash
+python3 run_cert_crl_ocsp.py <证书路径|证书目录> [输出目录] [--timeout 秒]
+python3 run_cert_crl_ocsp.py                        # 无参数 → 交互模式
+```
+
+- 证书侧：`zlint-all-lints -cert <证书>`（CA 414 条）
+- CRL 侧：`check_crl.py` 从证书 CDP 下载 CRL 转 PEM → 跑 18 条 CRL 规则
+- OCSP 侧：`check_ocsp.py` 查 OCSP 并存原始 DER 响应 → 跑 1 条 OCSP 规则
+- CRL/OCSP 联网失败（无 CDP/无 OCSP 地址/网络不通）自动跳过该侧，不中断整体
+
+输出 `results/<证书名>/`：`cert.json/.csv`、`crl.pem` + `crl.json/.csv`、`resp.der` + `ocsp.json/.csv`；末尾打印三侧真实执行的 pass/error 统计。传**目录**则批量（每证书一个子目录）。
 
 批量输出结构（每个证书一个子目录，含 xlsx 大表和 lint 的 JSON/CSV/JSONL）：
 

@@ -11,9 +11,13 @@ check_ocsp.py —— 用 Python 联网查询证书的 OCSP 状态
     4. 解析响应，输出 GOOD / REVOKED / UNKNOWN
 
 用法:
-    python3 check_ocsp.py <证书路径> [签发者证书路径] [--der] [--timeout 秒]
+    python3 check_ocsp.py <证书路径> [签发者证书路径] [--der] [--timeout 秒] [--respout 文件]
     python3 check_ocsp.py <证书路径> --status        # 只输出状态，静默其他信息
     python3 check_ocsp.py                            # 无参数 → 交互模式
+
+    --respout <文件>: 把 responder 返回的原始 OCSP 响应(DER)保存到文件，
+                      供 zlint 跑 OCSP 规则 (zlint -format der -longSummary <文件>)
+    证书/签发者证书均为 PEM/DER 自动识别；--der 仅表示优先按 DER 解析，失败自动回退。
 
 注意:
     - 未提供签发者证书时会尝试从证书的 AIA 下载，可能因网络/防火墙失败
@@ -30,6 +34,23 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509 import ocsp
 from cryptography.x509.oid import AuthorityInformationAccessOID, ExtensionOID
+
+
+def load_cert(data, prefer_der=False):
+    """加载证书，自动识别 PEM / DER；prefer_der=True 时先按 DER 解析
+
+    即使格式标错（如 PEM 文件被标成 DER）也会自动回退另一种，避免误报解析错误。
+    """
+    order = ([x509.load_der_x509_certificate, x509.load_pem_x509_certificate]
+             if prefer_der else
+             [x509.load_pem_x509_certificate, x509.load_der_x509_certificate])
+    last_err = None
+    for fn in order:
+        try:
+            return fn(data)
+        except ValueError as e:
+            last_err = e
+    raise last_err
 
 
 def get_aia_urls(cert):
@@ -95,7 +116,7 @@ def load_issuer(issuer_path, cert, ca_issuers_url, quiet=False):
     raise RuntimeError("未提供签发者证书，且证书 AIA 中没有 CA Issuers 地址")
 
 
-def query_ocsp(cert, issuer, ocsp_url, timeout=15, quiet=False):
+def query_ocsp(cert, issuer, ocsp_url, timeout=15, quiet=False, respout=None):
     """构造 OCSP 请求 → POST → 返回响应对象；http 失败自动试 https，失败重试"""
     urls = [ocsp_url]
     if ocsp_url.startswith("http://"):
@@ -122,6 +143,11 @@ def query_ocsp(cert, issuer, ocsp_url, timeout=15, quiet=False):
                     raise ValueError("空响应")
                 if not quiet and u != ocsp_url:
                     print(f"  {ocsp_url} 失败，改用 {u} 成功")
+                if respout:          # 保存 responder 返回的原始 DER（供 zlint 跑 OCSP 规则）
+                    with open(respout, "wb") as f:
+                        f.write(resp_der)
+                    if not quiet:
+                        print(f"原始 OCSP 响应已保存: {respout}")
                 return ocsp.load_der_ocsp_response(resp_der)
             except (urllib.error.HTTPError, urllib.error.URLError,
                     ValueError, TimeoutError) as e:
@@ -135,7 +161,8 @@ def query_ocsp(cert, issuer, ocsp_url, timeout=15, quiet=False):
     raise last_err
 
 
-def check_cert(cert_path, issuer_path=None, der=False, status_only=False, timeout=15):
+def check_cert(cert_path, issuer_path=None, der=False, status_only=False, timeout=15,
+               respout=None):
     """加载证书并查询 OCSP，输出结果；失败时按模式输出错误并退出"""
     cert_path = os.path.expanduser(cert_path)
     if issuer_path:
@@ -143,8 +170,7 @@ def check_cert(cert_path, issuer_path=None, der=False, status_only=False, timeou
 
     with open(cert_path, "rb") as f:
         data = f.read()
-    cert = (x509.load_der_x509_certificate(data) if der
-            else x509.load_pem_x509_certificate(data))
+    cert = load_cert(data, der)
 
     ocsp_url, ca_issuers_url = get_aia_urls(cert)
     if not ocsp_url:
@@ -171,7 +197,8 @@ def check_cert(cert_path, issuer_path=None, der=False, status_only=False, timeou
         sys.exit(1)
 
     try:
-        response = query_ocsp(cert, issuer, ocsp_url, timeout, quiet=status_only)
+        response = query_ocsp(cert, issuer, ocsp_url, timeout, quiet=status_only,
+                              respout=respout)
     except Exception as e:
         if status_only:
             print(f"ERROR: OCSP 查询失败: {e}", file=sys.stderr)
@@ -229,8 +256,8 @@ def interactive():
         print(f"  !! 文件不存在: {issuer_path}，改为自动下载")
         issuer_path = ""
 
-    # DER 格式：可选，默认 PEM
-    d = input("DER 格式 (y/N): ").strip().lower()
+    # DER 格式：可选，默认 PEM；PEM/DER 会自动识别，选错也会回退
+    d = input("DER 格式 (y/N，回车自动识别): ").strip().lower()
     if d in ("q", "quit"):
         sys.exit(0)
     der = d in ("y", "yes")
@@ -251,7 +278,12 @@ def interactive():
         sys.exit(0)
     status_only = s in ("y", "yes")
 
-    check_cert(cert_path, issuer_path or None, der, status_only, timeout)
+    # 保存原始 OCSP 响应：可选，回车跳过
+    rp = os.path.expanduser(input("保存原始 OCSP 响应到文件 (回车跳过): ").strip())
+    if rp.lower() in ("q", "quit"):
+        sys.exit(0)
+
+    check_cert(cert_path, issuer_path or None, der, status_only, timeout, rp or None)
 
 
 def main():
@@ -269,8 +301,15 @@ def main():
     timeout = 15
     if "--timeout" in args:
         timeout = int(args[args.index("--timeout") + 1])
+    respout = None
+    if "--respout" in args:
+        i = args.index("--respout")
+        if i + 1 >= len(args):
+            print("错误: --respout 需要文件路径参数", file=sys.stderr)
+            sys.exit(1)
+        respout = args[i + 1]
 
-    check_cert(cert_path, issuer_path, der, status_only, timeout)
+    check_cert(cert_path, issuer_path, der, status_only, timeout, respout)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,15 @@ __pycache__/
 # 批量运行输出目录
 /results/
 /results_crl/
+/results_all/
+/result_baidu_crl/
+/result_baidu_ocsp/
 /extracted/
+
+# 单证书 CRL/OCSP 下载与解析产物
+/crl.pem
+/resp.der
+/crl_sourcedata/
 
 # 证书样例目录
 /certs/

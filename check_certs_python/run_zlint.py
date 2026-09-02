@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-run_zlint.py —— 批量跑 zlint 全部 433 条规则（封装 run_batch.sh）
+run_zlint.py —— 跑 zlint 全部 433 条规则（封装 run_batch.sh）
 
-输入对象支持证书 / CRL / OCSP 响应：zlint-all-lints 按官方 CLI 顺序自动识别类型，
-对哪类对象就真实执行哪类规则，其余两类规则标 NA。
+输入支持:
+    - 目录：遍历其中所有证书 / CRL / OCSP 响应
+    - 单个文件：自动复制进临时目录跑，跑完自动清理（输出仍写到你指定的 out_dir）
+zlint-all-lints 按官方 CLI 顺序自动识别对象类型，对哪类对象就真实执行哪类规则，
+其余两类规则标 NA。
 
 用法:
-    python3 run_zlint.py <对象目录> [输出目录] [--timeout 秒] [--jsonl]
+    python3 run_zlint.py <对象目录|文件> [输出目录] [--timeout 秒] [--jsonl]
     python3 run_zlint.py                                        # 无参数 → 交互式输入
 
 --jsonl: 跑完后把每个 <name>.json 转成 <name>.jsonl（每行一条 lint 规则）
@@ -15,8 +18,10 @@ run_zlint.py —— 批量跑 zlint 全部 433 条规则（封装 run_batch.sh�
 import glob
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 # 本文件在 check_certs_python/ 下，run_batch.sh 在上一级（项目根目录）
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -40,54 +45,65 @@ def convert_to_jsonl(json_dir):
     return count
 
 
-def run_batch(cert_dir, out_dir=None, timeout=None, jsonl=False):
-    """调用 run_batch.sh 批量跑 lint，可选转 JSONL"""
+def run_batch(target, out_dir=None, timeout=None, jsonl=False):
+    """对目录或单个文件跑 lint；文件模式复制进临时目录，跑完自动清理"""
     # 0. 展开 ~（shell 符号，Python 不会自动展开），命令行/交互模式都覆盖
-    cert_dir = os.path.expanduser(cert_dir)
+    target = os.path.expanduser(target)
     if out_dir:
         out_dir = os.path.expanduser(out_dir)
 
-    # 1. 前置检查：脚本存在、对象目录存在
+    # 1. 前置检查：脚本存在、目标路径存在（目录或文件均可）
     if not os.path.isfile(SCRIPT):
         print(f"错误: 找不到 {SCRIPT}", file=sys.stderr)
         sys.exit(1)
-    if not os.path.isdir(cert_dir):
-        print(f"错误: 目录不存在 -> {cert_dir}", file=sys.stderr)
+    if not os.path.exists(target):
+        print(f"错误: 路径不存在 -> {target}", file=sys.stderr)
         sys.exit(1)
 
-    # 2. 组装命令（列表传参，路径带空格也安全）
-    cmd = [SCRIPT, cert_dir]
+    # 2. 单文件模式：复制进临时目录，让 run_batch.sh 正常遍历
+    tmp_dir = None
+    if os.path.isfile(target):
+        tmp_dir = tempfile.mkdtemp(prefix="zlint_all_")
+        shutil.copy2(target, os.path.join(tmp_dir, os.path.basename(target)))
+        print(f"单文件模式: 已复制 {os.path.basename(target)} 到临时目录")
+        target = tmp_dir
+
+    # 3. 组装命令（列表传参，路径带空格也安全）
+    cmd = [SCRIPT, target]
     if out_dir:
         cmd.append(out_dir)
 
     print(f"执行: {' '.join(cmd)}")
-    # 3. 不捕获输出 → run_batch.sh 的进度会实时打到终端
+    # 4. 不捕获输出 → run_batch.sh 的进度会实时打到终端
     result = subprocess.run(cmd, text=True, timeout=timeout)
 
-    # 4. 检查退出码
+    # 5. 清理临时目录（输出文件已由 run_batch.sh 写入 out_dir）
+    if tmp_dir:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # 6. 检查退出码
     if result.returncode != 0:
         print(f"run_batch.sh 执行失败 (exit code {result.returncode})", file=sys.stderr)
         sys.exit(result.returncode)
 
-    # 5. 只有加了 --jsonl 才转换
+    # 7. 只有加了 --jsonl 才转换
     if jsonl:
         real_out = out_dir or "results"   # 与 run_batch.sh 默认值保持一致
         convert_to_jsonl(real_out)
 
 
 def interactive():
-    """无参数时的交互式输入：对象目录必填，其余可回车跳过"""
-    print("=== 交互模式（直接回车使用默认值，输入 q 退出）===")
+    """无参数时的交互式输入：对象目录或文件必填，其余可回车跳过"""
+    print("=== 交互模式（目录或单个文件皆可，直接回车使用默认值，输入 q 退出）===")
 
-    # 对象目录：必填，循环直到存在（支持 ~ 展开）
-    cert_dir = os.path.expanduser(input("对象目录: ").strip())
+    target = os.path.expanduser(input("对象目录或文件: ").strip())
     while True:
-        if cert_dir.lower() in ("q", "quit"):
+        if target.lower() in ("q", "quit"):
             sys.exit(0)
-        if os.path.isdir(cert_dir):
+        if os.path.exists(target):
             break
-        print(f"  !! 目录不存在: {cert_dir}")
-        cert_dir = os.path.expanduser(input("请重新输入对象目录 (q 退出): ").strip())
+        print(f"  !! 路径不存在: {target}")
+        target = os.path.expanduser(input("请重新输入目录或文件 (q 退出): ").strip())
 
     # 输出目录：可选，回车跳过 → run_batch.sh 用默认 ./results
     out_dir = os.path.expanduser(input("输出目录 (回车默认 ./results): ").strip())
@@ -108,7 +124,7 @@ def interactive():
     j = input("是否生成 JSONL (y/N): ").strip().lower()
     jsonl = j in ("y", "yes")
 
-    run_batch(cert_dir, out_dir or None, timeout, jsonl)
+    run_batch(target, out_dir or None, timeout, jsonl)
 
 
 def main():
@@ -134,14 +150,14 @@ def main():
             rest.append(args[i])
             i += 1
 
-    cert_dir = rest[0] if rest else None
+    target = rest[0] if rest else None
     out_dir = rest[1] if len(rest) > 1 else None
 
-    if not cert_dir:
-        print("用法: python3 run_zlint.py <对象目录> [输出目录] [--timeout 秒] [--jsonl]")
+    if not target:
+        print("用法: python3 run_zlint.py <对象目录|文件> [输出目录] [--timeout 秒] [--jsonl]")
         sys.exit(1)
 
-    run_batch(cert_dir, out_dir, timeout, jsonl)
+    run_batch(target, out_dir, timeout, jsonl)
 
 
 if __name__ == "__main__":

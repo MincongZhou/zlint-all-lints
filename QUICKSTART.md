@@ -286,3 +286,43 @@ python3 run_all.py                                # 无参数 → 交互模式
 ```
 
 xlsx 共 5 个 sheet（zlint / 组织名 / SCT时间 / OCSP查询 / 汇总），`汇总` sheet 统一三列 `type / 内容 / status`。需要 `pip install cryptography openpyxl`。
+
+### 11.6 下载证书的 CRL（check_crl.py）
+
+从证书 CDP（CRL Distribution Points）扩展下载 CRL 并统一转成 PEM，供 `zlint-all-lints` 真实执行 18 条 CRL 规则：
+
+```bash
+python3 check_certs_python/check_crl.py certs/baidu.pem --out crl.pem
+./zlint-all-lints -cert crl.pem           # 下载完直接喂 zlint（自动识别为 crl）
+```
+
+- 自动遍历证书 CDP 里的全部 http(s) 分发点，逐个尝试直到成功
+- 下载内容会校验确实是 CRL（防 HTML 错误页/误传证书）；无参数运行进入交互模式
+
+### 11.7 解析 CRL 吊销序列号（crl_sourcedata.py）
+
+CRL 本身只含吊销条目的**序列号 + 吊销时间 + 原因码**，不含证书本体。解析出序列号清单后，可拿序列号去本地证书池反查"哪张证书被吊销"：
+
+```bash
+python3 check_certs_python/crl_sourcedata.py crl.pem                  # 逐行输出 0x序列号 + 十进制
+python3 check_certs_python/crl_sourcedata.py crls/ --csv revoked.csv  # 目录批量 + 导出 CSV（含吊销时间/原因）
+```
+
+与 11.6 组合成"下载 + 解析"一条龙：
+
+```bash
+python3 check_certs_python/check_crl.py certs/baidu.pem --out crl.pem \
+  && python3 check_certs_python/crl_sourcedata.py crl.pem --csv baidu_revoked.csv
+```
+
+### 11.8 一张证书跑齐 CA / CRL / OCSP 三类规则（run_cert_crl_ocsp.py）
+
+zlint 对单个输入对象只真实执行所属类型的规则（证书→CA 414 条、CRL→18 条、OCSP→1 条），其余标 `NA`。本脚本把证书的**配套吊销对象**（CRL / OCSP 响应）也取下来一起跑，三类规则全部真实执行：
+
+```bash
+python3 run_cert_crl_ocsp.py certs/baidu.pem          # 联网下载 CRL + 查 OCSP，三侧全跑
+python3 run_cert_crl_ocsp.py certs                     # 目录批量，每证书一个子目录
+```
+
+- 证书侧 `zlint-all-lints`（CA 414 条）；CRL 侧由 `check_crl.py` 下载后跑 18 条；OCSP 侧由 `check_ocsp.py` 查询并存 DER 响应后跑 1 条
+- CRL/OCSP 联网失败（无 CDP / 无 OCSP 地址 / 网络不通）自动跳过对应侧，不中断整体
