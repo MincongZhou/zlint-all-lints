@@ -344,3 +344,21 @@ python3 find_cert_root_python/find_cert_root.py cert.pem --trust cacert.pem  # �
 - 找上级：本地 `--pool` →（`--download`）AIA 下载 → 信任库自签根兜底。中间 CA 常无 CA Issuers（如 GlobalSign RSA OV SSL CA 2018 仅 OCSP），最后一跳靠系统信任库 / `--trust` bundle 里的根接上
 - 链顶与信任库同名根证书比对指纹：一致才是信任锚，同名不同钥不可信
 - 链完整且顶部自签时自动调 `openssl verify` 终裁；`certs/baidu.pem` 即 GlobalSign 链，可作演示
+
+### 11.10 交叉核验 CRL 与 OCSP 的吊销一致性（check_revocation_consistency.py）
+
+同一张证书的吊销事实可能同时出现在 **CRL**（CA 周期签发，条目含序列号 + 吊销时间 + 原因码）与 **OCSP**（responder 实时回答）两条独立渠道，正常应结果一致。本脚本把两源的吊销信息都取下来交叉比对，抓"CRL 已吊销但 OCSP 未吊销""吊销时间不一致""吊销原因码不一致"这类**数据不同步**问题——跑 zlint 格式规则（CA/CRL/OCSP 合规）发现不了，需语义层核验：
+
+```bash
+python3 check_certs_python/check_revocation_consistency.py certs/baidu.pem                  # CDP 下载 CRL + 在线查 OCSP
+python3 check_certs_python/check_revocation_consistency.py certs/ --csv result.csv          # 目录批量 + 汇总 CSV
+python3 check_certs_python/check_revocation_consistency.py cert.pem --crl crl.pem --no-ocsp # 离线：只用本地 CRL
+python3 check_certs_python/check_revocation_consistency.py cert.pem --no-crl                # 只看 OCSP 侧
+```
+
+- CRL 侧：从证书 CDP 自动下载（`--crl <文件>` 可改指本地 CRL）；OCSP 侧：从 AIA 查 responder（签发者可 `--issuer` 本地给，否则从 CA Issuers 自动下载）
+- 按**序列号**在 CRL 中反查吊销条目（吊销时间/原因码），与 OCSP 返回比对：状态一致性、吊销时间（精确到秒）、吊销原因
+- 顺带做时间自洽性检查：吊销时间不得晚于该源 `this_update`、不得早于证书 `notBefore`
+- 判定结论：`未吊销` / `一致` / `不一致`（状态冲突 / 时间差异 X 秒 / 原因不同）/ `单源`（仅 CRL 或仅 OCSP，不判失败）/ `无吊销源`
+- 批量多证书时逐张打印一行；`--csv` 汇总每张证书两源时间戳与秒级差异
+- 退出码：存在任何不一致 → 1，其余 → 0（单源、网络失败不计为不一致），适合脚本化/CI 把关

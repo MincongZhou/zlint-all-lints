@@ -264,6 +264,23 @@ SCT时间    Jul 09 02:33:07.208000 2026 GMT         (空)
 OCSP查询   (空)                                    GOOD
 ```
 
+### check_revocation_consistency.py —— 交叉核验 CRL 与 OCSP 的吊销信息一致性
+
+同一张证书的吊销事实可能同时出现在两条独立渠道——**CRL** 与 **OCSP**。正常运营下二者对同一证书应结果一致（状态、吊销时间、原因码）。本脚本把两源的吊销信息都取下来**交叉比对**，抓"CRL 已吊销但 OCSP 未吊销""吊销时间差几秒/几天""吊销原因码不一致"这类数据不同步问题——这类问题跑 zlint 格式规则（CA/CRL/OCSP 合规）发现不了：
+
+```bash
+python3 check_certs_python/check_revocation_consistency.py <证书路径|证书目录> ... [选项]
+python3 check_certs_python/check_revocation_consistency.py certs/baidu.pem                   # CDP 下载 CRL + 在线查 OCSP
+python3 check_certs_python/check_revocation_consistency.py certs/ --csv result.csv           # 目录批量 + 汇总 CSV
+python3 check_certs_python/check_revocation_consistency.py cert.pem --crl crl.pem --no-ocsp  # 离线：只用本地 CRL
+```
+
+- CRL 侧：从证书 CDP 自动下载（`--crl <文件>` 可改指本地 CRL）；OCSP 侧：从 AIA 查 responder（签发者可 `--issuer` 本地给，否则从 CA Issuers 自动下载）
+- 按**序列号**在 CRL 中反查吊销条目（吊销时间/原因码），与 OCSP 返回比对：状态一致性、吊销时间（精确到秒）、吊销原因
+- 顺带做时间自洽性检查：吊销时间不得晚于该源 `this_update`、不得早于证书 `notBefore`（同一源内自相矛盾同样报）
+- 判定结论：`未吊销` / `一致` / `不一致`（状态冲突 / 时间差异 X 秒 / 原因不同）/ `单源`（仅 CRL 或仅 OCSP，不判失败）/ `无吊销源`；批量多证书时逐张打印一行 + 可选 `--csv` 汇总（含两源时间戳与秒级差异）
+- 退出码：存在任何不一致 → 1，其余 → 0（单源、网络失败不计为不一致），便于脚本化/CI 把关
+
 ### find_cert_root_python/ —— 沿 issuer 追到根证书（证书链分析）
 
 对任意一张证书沿 issuer 一路追到根证书，并把链顶与信任库（系统 / 指定 bundle）做 SHA-256 指纹比对，判断它是否构成当前环境的"信任锚"——对应审计中"某证书的 root 是谁、是否被信任"这类问题：
