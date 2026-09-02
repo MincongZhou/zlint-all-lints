@@ -281,6 +281,30 @@ python3 check_certs_python/check_revocation_consistency.py cert.pem --crl crl.pe
 - 判定结论：`未吊销` / `一致` / `不一致`（状态冲突 / 时间差异 X 秒 / 原因不同）/ `单源`（仅 CRL 或仅 OCSP，不判失败）/ `无吊销源`；批量多证书时逐张打印一行 + 可选 `--csv` 汇总（含两源时间戳与秒级差异）
 - 退出码：存在任何不一致 → 1，其余 → 0（单源、网络失败不计为不一致），便于脚本化/CI 把关
 
+### check_certs_python/ct_audit/ —— 证书透明度 CT 审计（SCT 证据链）
+
+CT（Certificate Transparency）回答"CA 是否真的把这张证书提交到了公开日志、收据是否真实"，是浏览器信任模型的一环，与 zlint（签发格式合规）、CRL/OCSP（吊销）构成**签发 → 公开登记 → 吊销**三段证据链中的中间段。本目录按三层框架对嵌入式 SCT 做审计（方法学与实测底稿见 `ct_audit/README.md`）：
+
+| 脚本 | 层 | 作用 |
+|---|---|---|
+| `parse_sct.py` | L1 签发覆盖 | DER 级提取并解析 SCT（log_id / 时间戳 / 签名算法），匹配 Google log list 快照给出运营方/状态 |
+| `verify_sct.py` | L2 签名真实性 | RFC 6962 §3.2 密码学验签：证明 SCT 是日志运营方私钥对这张证书(precert)的真实签名 |
+| `ct_log_liveness.py` | L3 日志存活性 | 调各日志 `get-sth`，用同一日志公钥验 STH 签名（RFC 6962 §3.5）——日志在线且密钥未换，记录审计时点 tree_size |
+| `check_ct_temporal.py` | 时间交叉核验 | 自动化比对 SCT 时间戳 × 证书 notBefore/notAfter × 审计时点 × 日志 `temporal_interval`，批量 `--csv` 汇总 |
+
+```bash
+python3 check_certs_python/ct_audit/parse_sct.py certs/baidu.pem              # L1 提取+匹配(默认读 samples/)
+python3 check_certs_python/ct_audit/verify_sct.py cert.pem issuer.crt          # L2 验签(证书+签发者)
+python3 check_certs_python/ct_audit/ct_log_liveness.py cert.pem                # L3 存活性(联网 get-sth)
+python3 check_certs_python/ct_audit/check_ct_temporal.py cert.pem              # 时间交叉核验
+python3 check_certs_python/ct_audit/check_ct_temporal.py certs/ --csv t.csv    # 批量 + 汇总 CSV
+```
+
+- 自带演示与证据：`samples/` 含 baidu（GlobalSign RSA OV SSL CA 2018 签发）与 LE 对照组证书、签发者，及 **log list v3 快照**（`log_list_v3_snapshot.json`）。log list 是**时敏证据**，审计应在每次时点留存快照；`--loglist` 指定、`--offline` 强制"无本地快照即报错"（防误用在线清单）
+- `check_ct_temporal.py` 判定：逐 SCT 与证书有效期、审计时点、日志 `temporal_interval`、日志状态交叉核验——任何"不一致"退出码 1（晚于审计时点 / 晚于 notAfter / 早于 notBefore 超 24h 窗口 / SCT 落在日志时间域外）；"观察"（日志非 usable、快照未匹配、略早于 notBefore）需人工确认；CA/中间证书无 SCT 不算失败（CT 政策只约束 TLS 服务器证书）
+- 方法学关键点（详见 `verify_sct.py` 头部注释）：嵌入式 SCT 验签的 precert TBS 重建 = **只删 SCT 扩展、不插 poison**（对齐 Google ct-go `RemoveSCTList` / Chrome `GetPrecertSignedEntry`）；SCT 自带的 CtExtensions **须按原样拼入签名输入**，硬编码空扩展会把真实 SCT 误判为失败
+- 实测示例（可复现）：baidu 3/3 SCT 验签通过、3 日志全部在线（STH 验签 OK）；但其 SCT 时间戳落在三条日志当前快照 `temporal_interval`（2027-01-01 起）**之外**，`check_ct_temporal.py` 判"不一致"，需调取签发时点 log list 复核（O2 类时间域观察）；LE 对照组 PASS——演示了时间交叉核验的实际价值
+
 ### find_cert_root_python/ —— 沿 issuer 追到根证书（证书链分析）
 
 对任意一张证书沿 issuer 一路追到根证书，并把链顶与信任库（系统 / 指定 bundle）做 SHA-256 指纹比对，判断它是否构成当前环境的"信任锚"——对应审计中"某证书的 root 是谁、是否被信任"这类问题：

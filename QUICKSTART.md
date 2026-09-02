@@ -362,3 +362,23 @@ python3 check_certs_python/check_revocation_consistency.py cert.pem --no-crl    
 - 判定结论：`未吊销` / `一致` / `不一致`（状态冲突 / 时间差异 X 秒 / 原因不同）/ `单源`（仅 CRL 或仅 OCSP，不判失败）/ `无吊销源`
 - 批量多证书时逐张打印一行；`--csv` 汇总每张证书两源时间戳与秒级差异
 - 退出码：存在任何不一致 → 1，其余 → 0（单源、网络失败不计为不一致），适合脚本化/CI 把关
+
+### 11.11 证书透明度 CT 审计：SCT 证据链（check_certs_python/ct_audit/）
+
+CT 审计回答"CA 是否真的把证书提交到了公开日志、SCT 收据是否真实、声称的日志是否在线"，与 zlint（签发合规）、CRL/OCSP（吊销）互补。四脚本三层审计 + 一个自动化时间交叉核验（方法学与实测底稿见 `ct_audit/README.md`）：
+
+```bash
+# L1 签发覆盖: 提取解析 SCT 并匹配 Google log list 快照（运营方/状态）
+python3 check_certs_python/ct_audit/parse_sct.py certs/baidu.pem
+# L2 签名真实性: RFC 6962 §3.2 验签（目标证书 + 签发者证书）
+python3 check_certs_python/ct_audit/verify_sct.py cert.pem issuer.crt
+# L3 日志存活性: get-sth + 日志公钥验 STH 签名（联网），记录 tree_size
+python3 check_certs_python/ct_audit/ct_log_liveness.py cert.pem
+# 自动化时间交叉核验: SCT 时间戳 × 有效期 × 审计时点 × 日志 temporal_interval
+python3 check_certs_python/ct_audit/check_ct_temporal.py certs/ --csv ct_temporal.csv
+```
+
+- `samples/` 自带可复现演示：baidu（GlobalSign 2018 签发，3 个 SCT）+ LE 对照组（2 个 SCT）+ 签发者 + log list v3 快照（时敏证据，审计固定快照；`--loglist` 指定、`--offline` 防误用在线清单）
+- 时间核验判定：逐 SCT 交叉比对证书 notBefore/notAfter、审计时点、日志 `temporal_interval` 与状态；任何"不一致"退出码 1，"观察"项需人工确认，CA 证书无 SCT 不算失败
+- 关键方法学：验签的 precert TBS 重建 = 只删 SCT 扩展、不插 poison（对齐 ct-go/Chrome）；SCT 自带 CtExtensions 须原样拼入签名输入（见 `verify_sct.py` 头部注释）
+- 实测示例：baidu 3/3 验签通过、3 日志在线；但 3 个 SCT 均落在日志当前快照时间域（2027-01-01 起）之外 → `check_ct_temporal.py` 判不一致（O2 类，需调取签发时点 log list 复核）；LE 对照组 PASS
