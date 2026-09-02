@@ -85,19 +85,27 @@ e_basic_cons_not_critical,CA,"The BasicConstraints extension MUST be marked crit
 
 ## 批量跑 / Batch run
 
-`run_batch.sh` 遍历一个目录下的所有对象（证书 / CRL / OCSP），每个对象输出一份 JSON + 一份 CSV，并汇总成带文件名的总 CSV：
+`run_batch.sh` 遍历一个目录下的所有对象（证书 / CRL / OCSP），每个对象跑完立即把 CSV 合并进带文件名的总 CSV；**默认只保留汇总表**，单对象的 JSON/CSV 合并完即删（边跑边删，避免成百上千个中间文件占磁盘），加 `--detail` 才保留：
 
 ```bash
-./run_batch.sh <对象目录> [输出目录]   # 输出目录默认 ./results
+./run_batch.sh <对象目录> [输出目录] [--detail]   # 输出目录默认 ./results
 ```
 
 例：
 
 ```bash
-./run_batch.sh certs results
+./run_batch.sh certs results               # 只留汇总表（默认）
+./run_batch.sh certs results --detail      # 额外保留每个对象的 JSON/CSV
 ```
 
-产物：
+默认产物（只留汇总）：
+
+```text
+results/
+└── results_summary.csv        # 汇总：全部对象 × 全部规则，首列 cert 为文件名
+```
+
+`--detail` 产物（加选项后）：
 
 ```text
 results/
@@ -106,6 +114,8 @@ results/
 ├── crl.pem   → crl.csv                 # CRL 输入同样输出 433 行
 └── results_summary.csv                 # 汇总：全部对象 × 全部规则，首列 cert 为文件名
 ```
+
+批量跑大量对象时也建议把输出目录指到内存盘（如 `/dev/shm/zlint_results`），跑完释放、不占磁盘。
 
 汇总 CSV 表头比单对象多一列 `cert`，可直接在 Excel 里按文件、按 `status`、按 `type` 透视筛选。
 
@@ -168,12 +178,13 @@ python3 check_crl.py certs/baidu.pem --out crl.pem \
   && python3 crl_sourcedata.py crl.pem --csv baidu_revoked.csv
 ```
 
-**`run_zlint.py`**：`run_batch.sh` 的 Python 封装（支持证书/CRL/OCSP 的**目录或单个文件**），支持交互模式与 `--jsonl` 转换
+**`run_zlint.py`**：`run_batch.sh` 的 Python 封装（支持证书/CRL/OCSP 的**目录或单个文件**），支持交互模式与 `--jsonl` 转换。默认同 `run_batch.sh` 只留汇总表；`--detail` 透传给底层脚本以保留单对象 JSON/CSV，`--jsonl` 需要读 JSON 源文件，会自动保留：
 
 ```bash
-python3 run_zlint.py <对象目录|文件> [输出目录] [--timeout 秒] [--jsonl]
+python3 run_zlint.py <对象目录|文件> [输出目录] [--timeout 秒] [--jsonl] [--detail]
 python3 run_zlint.py certs/baidu.pem results/    # 单文件：自动临时目录，跑完清理
-python3 run_zlint.py certs                        # 目录：批量遍历
+python3 run_zlint.py certs --detail              # 批量跑并保留每个对象的 JSON/CSV
+python3 run_zlint.py certs --jsonl               # 跑完把 JSON 转 JSONL（自动保留源文件）
 python3 run_zlint.py                            # 无参数 → 交互模式
 ```
 
@@ -207,7 +218,7 @@ python3 run_all.py                     # 无参数 → 交互模式
 zlint 对单个输入对象只真实执行其所属类型的规则（证书→CA 414 条、CRL→18 条、OCSP→1 条），其余标 `NA`。本脚本把证书的**配套吊销对象**也取下来一起跑，三类规则全部真实执行：
 
 ```bash
-python3 run_cert_crl_ocsp.py <证书路径|证书目录> [输出目录] [--timeout 秒]
+python3 run_cert_crl_ocsp.py <证书路径|证书目录> [输出目录] [--timeout 秒] [--detail]
 python3 run_cert_crl_ocsp.py                        # 无参数 → 交互模式
 ```
 
@@ -216,7 +227,19 @@ python3 run_cert_crl_ocsp.py                        # 无参数 → 交互模式
 - OCSP 侧：`check_ocsp.py` 查 OCSP 并存原始 DER 响应 → 跑 1 条 OCSP 规则
 - CRL/OCSP 联网失败（无 CDP/无 OCSP 地址/网络不通）自动跳过该侧，不中断整体
 
-输出 `results/<证书名>/`：`cert.json/.csv`、`crl.pem` + `crl.json/.csv`、`resp.der` + `ocsp.json/.csv`；末尾打印三侧真实执行的 pass/error 统计。传**目录**则批量（每证书一个子目录）。
+**默认精简模式**：每张证书三侧的结果合并进输出根下的三张汇总表后，中间 JSON/CSV 随跑随删；联网证据 `crl.pem` / `resp.der` 保留在该证书目录。加 `--detail` 则完整保留每张证书的 `cert/crl/ocsp` 的 `.json/.csv`。
+
+```text
+results/                    # 默认：只留三张汇总表 + 每证书的证据文件
+├── ca_summary.csv          # 全部证书的证书侧汇总（首列 cert 为证书名）
+├── crl_summary.csv         # CRL 侧汇总
+├── ocsp_summary.csv        # OCSP 侧汇总
+└── baidu/
+    ├── crl.pem             # 证据：下载的 CRL（有则保留）
+    └── resp.der            # 证据：原始 OCSP 响应（有则保留）
+```
+
+末尾打印三侧真实执行的 pass/error 统计。传**目录**则批量（每证书一个子目录，默认同样精简）。
 
 批量输出结构（每个证书一个子目录，含 xlsx 大表和 lint 的 JSON/CSV/JSONL）：
 
@@ -240,3 +263,25 @@ CA         e_adobe_extensions_legacy_multipurpose  NA
 SCT时间    Jul 09 02:33:07.208000 2026 GMT         (空)
 OCSP查询   (空)                                    GOOD
 ```
+
+### find_cert_root_python/ —— 沿 issuer 追到根证书（证书链分析）
+
+对任意一张证书沿 issuer 一路追到根证书，并把链顶与信任库（系统 / 指定 bundle）做 SHA-256 指纹比对，判断它是否构成当前环境的"信任锚"——对应审计中"某证书的 root 是谁、是否被信任"这类问题：
+
+```bash
+python3 find_cert_root_python/find_cert_root.py <证书路径> [选项]
+python3 find_cert_root_python/find_cert_root.py certs/baidu.pem --download
+        # 允许联网：本地找不齐时从 AIA CA-Issuers 自动下载（http 失败兜底 https）
+python3 find_cert_root_python/find_cert_root.py cert.pem --pool <目录|文件>
+        # 从本地证书池找上级（可把含中间 CA / 根的目录指进来）
+python3 find_cert_root_python/find_cert_root.py cert.pem --trust cacert.pem
+        # 指定信任库 bundle（默认自动找系统信任库）
+```
+
+- 追链逻辑：重复"`issuer` DN == 上级 `subject` DN + 验签"直到 `subject == issuer`（自签候选根）；验签支持 RSA PKCS1/PSS、ECDSA、Ed25519/Ed448
+- 找上级的来源依次：本地 `--pool` →（开 `--download` 时）AIA CA-Issuers 下载 → 信任库中的自签根兜底。最后一条很关键：不少中间 CA 的 AIA **只有 OCSP、没有 CA Issuers**（如 GlobalSign RSA OV SSL CA 2018），最后一跳只能靠本地已有的根接上——默认自动并入系统信任库里的根，`--trust` 可换指定 bundle
+- 信任库比对：链顶根证书与信任库中同名根证书做 SHA-256 指纹比对——**指纹一致才是信任锚，同名不同钥不可信**
+- `--pool` 目录会递归扫 `*.pem / *.crt / *.cer / *.der`；PEM/DER 自动识别，PEM 容忍文件头注释与多证书 bundle
+- 链完整且顶部为自签根时，自动调用 `openssl verify` 做整链终裁（`--no-openssl` 跳过）
+- 自带演示：`certs/baidu.pem` 是 GlobalSign 链，单条 `--download` 即可从叶子一路追到根并确认信任锚（叶子 → GlobalSign RSA OV SSL CA 2018 → GlobalSign Root CA - R3）
+- 依赖：`pip install cryptography`

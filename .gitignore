@@ -9,10 +9,8 @@ __pycache__/
 /lint_results.csv
 /cert_info.json
 
-# 批量运行输出目录
-/results/
-/results_crl/
-/results_all/
+# 批量运行输出目录（results 开头一律忽略，含 results_1 / results_new 等）
+/results*/
 /result_baidu_crl/
 /result_baidu_ocsp/
 /extracted/

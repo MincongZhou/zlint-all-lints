@@ -253,8 +253,9 @@ st=$(python3 check_ocsp.py cert.pem --status 2>/dev/null) && echo "状态: $st"
 ### 11.2 批量跑 lint 的 Python 封装（run_zlint.py）
 
 ```bash
-python3 run_zlint.py certs                       # 批量跑，输出到默认 ./results
-python3 run_zlint.py certs results --jsonl       # 额外把每个 JSON 转成 JSONL（每行一条规则）
+python3 run_zlint.py certs                       # 批量跑，输出到默认 ./results（默认只留汇总表）
+python3 run_zlint.py certs --detail              # 保留每个对象的 JSON/CSV
+python3 run_zlint.py certs results --jsonl       # 把每个 JSON 转成 JSONL（自动保留源 JSON）
 python3 run_zlint.py                             # 无参数 → 交互模式
 ```
 
@@ -321,8 +322,25 @@ zlint 对单个输入对象只真实执行所属类型的规则（证书→CA 41
 
 ```bash
 python3 run_cert_crl_ocsp.py certs/baidu.pem          # 联网下载 CRL + 查 OCSP，三侧全跑
-python3 run_cert_crl_ocsp.py certs                     # 目录批量，每证书一个子目录
+python3 run_cert_crl_ocsp.py certs                     # 目录批量（每证书一个子目录）
+python3 run_cert_crl_ocsp.py certs --detail            # 保留每证书完整产物（默认只留三张汇总表）
 ```
 
+- 默认精简：每证书三侧结果合并进输出根下的 `ca_summary.csv` / `crl_summary.csv` / `ocsp_summary.csv`（首列 cert 为证书名），中间 JSON/CSV 随跑随删，只保留联网证据 `crl.pem` / `resp.der`
 - 证书侧 `zlint-all-lints`（CA 414 条）；CRL 侧由 `check_crl.py` 下载后跑 18 条；OCSP 侧由 `check_ocsp.py` 查询并存 DER 响应后跑 1 条
 - CRL/OCSP 联网失败（无 CDP / 无 OCSP 地址 / 网络不通）自动跳过对应侧，不中断整体
+
+### 11.9 沿 issuer 追到根证书（find_cert_root.py）
+
+从任意一张证书出发，沿 issuer 一路追到 root，并把链顶与信任库做 SHA-256 指纹比对，判断它是否构成当前环境的"信任锚"（证书链分析，不跑 lint）：
+
+```bash
+python3 find_cert_root_python/find_cert_root.py certs/baidu.pem --download   # 允许联网：AIA 下载缺的中间 CA，根由信任库自签根兜底
+python3 find_cert_root_python/find_cert_root.py cert.pem --pool ca_dir       # 本地证书池找上级
+python3 find_cert_root_python/find_cert_root.py cert.pem --trust cacert.pem  # 指定信任库 bundle
+```
+
+- 重复"issuer DN 匹配 + 验签"直到自签根；`--pool` 支持目录递归（`.pem/.crt/.cer/.der`），PEM/DER 自动识别
+- 找上级：本地 `--pool` →（`--download`）AIA 下载 → 信任库自签根兜底。中间 CA 常无 CA Issuers（如 GlobalSign RSA OV SSL CA 2018 仅 OCSP），最后一跳靠系统信任库 / `--trust` bundle 里的根接上
+- 链顶与信任库同名根证书比对指纹：一致才是信任锚，同名不同钥不可信
+- 链完整且顶部自签时自动调 `openssl verify` 终裁；`certs/baidu.pem` 即 GlobalSign 链，可作演示

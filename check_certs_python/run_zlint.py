@@ -9,10 +9,12 @@ zlint-all-lints 按官方 CLI 顺序自动识别对象类型，对哪类对象�
 其余两类规则标 NA。
 
 用法:
-    python3 run_zlint.py <对象目录|文件> [输出目录] [--timeout 秒] [--jsonl]
+    python3 run_zlint.py <对象目录|文件> [输出目录] [--timeout 秒] [--jsonl] [--detail]
     python3 run_zlint.py                                        # 无参数 → 交互式输入
 
 --jsonl: 跑完后把每个 <name>.json 转成 <name>.jsonl（每行一条 lint 规则）
+--detail: 保留每个对象的 <name>.json / <name>.csv（run_batch.sh 默认只留汇总表）
+          注意: 加 --jsonl 时自动等价于 --detail（jsonl 由 json 转换而来，必须保留源文件）
 """
 
 import glob
@@ -45,12 +47,16 @@ def convert_to_jsonl(json_dir):
     return count
 
 
-def run_batch(target, out_dir=None, timeout=None, jsonl=False):
+def run_batch(target, out_dir=None, timeout=None, jsonl=False, detail=False):
     """对目录或单个文件跑 lint；文件模式复制进临时目录，跑完自动清理"""
     # 0. 展开 ~（shell 符号，Python 不会自动展开），命令行/交互模式都覆盖
     target = os.path.expanduser(target)
     if out_dir:
         out_dir = os.path.expanduser(out_dir)
+
+    # jsonl 由 <name>.json 转换而来，必须保留单对象文件 → 自动等价于 --detail
+    if jsonl:
+        detail = True
 
     # 1. 前置检查：脚本存在、目标路径存在（目录或文件均可）
     if not os.path.isfile(SCRIPT):
@@ -72,6 +78,8 @@ def run_batch(target, out_dir=None, timeout=None, jsonl=False):
     cmd = [SCRIPT, target]
     if out_dir:
         cmd.append(out_dir)
+    if detail:
+        cmd.append("--detail")
 
     print(f"执行: {' '.join(cmd)}")
     # 4. 不捕获输出 → run_batch.sh 的进度会实时打到终端
@@ -120,11 +128,15 @@ def interactive():
         print(f"  !! '{t}' 不是数字，按不限时处理")
         timeout = None
 
-    # 是否生成 JSONL：可选，默认不生成
+    # 是否生成 JSONL：可选，默认不生成（--jsonl 会自动保留单对象文件）
     j = input("是否生成 JSONL (y/N): ").strip().lower()
     jsonl = j in ("y", "yes")
 
-    run_batch(target, out_dir or None, timeout, jsonl)
+    # 是否保留每个对象的 JSON/CSV：可选，默认不保留（只留汇总表）
+    d = input("是否保留每个对象的 JSON/CSV (y/N): ").strip().lower()
+    detail = d in ("y", "yes")
+
+    run_batch(target, out_dir or None, timeout, jsonl, detail)
 
 
 def main():
@@ -134,8 +146,9 @@ def main():
         interactive()
         return
 
-    # 有参数 → 命令行模式：逐个解析，--timeout / --jsonl 可放在任意位置
+    # 有参数 → 命令行模式：逐个解析，--timeout / --jsonl / --detail 可放在任意位置
     jsonl = False
+    detail = False
     timeout = None
     rest = []
     i = 0
@@ -146,6 +159,9 @@ def main():
         elif args[i] == "--jsonl":
             jsonl = True
             i += 1
+        elif args[i] == "--detail":
+            detail = True
+            i += 1
         else:
             rest.append(args[i])
             i += 1
@@ -154,10 +170,11 @@ def main():
     out_dir = rest[1] if len(rest) > 1 else None
 
     if not target:
-        print("用法: python3 run_zlint.py <对象目录|文件> [输出目录] [--timeout 秒] [--jsonl]")
+        print("用法: python3 run_zlint.py <对象目录|文件> [输出目录] "
+              "[--timeout 秒] [--jsonl] [--detail]")
         sys.exit(1)
 
-    run_batch(target, out_dir, timeout, jsonl)
+    run_batch(target, out_dir, timeout, jsonl, detail)
 
 
 if __name__ == "__main__":
