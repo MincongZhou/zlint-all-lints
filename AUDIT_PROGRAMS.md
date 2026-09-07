@@ -97,6 +97,12 @@ st=$(python3 check_ocsp.py cert.pem --status 2>/dev/null) && echo "$st"
 
 `--respout <文件>` 把 responder 返回的**原始 OCSP 响应 (DER)** 存下来，可再喂 `zlint-all-lints` 跑那 1 条 OCSP 规则。
 
+批量查询用根目录的 `run_ocsp_batch.py`（`check_ocsp.py` 的封装）：目录递归收集证书逐张查状态、失败不中断，可 `--csv` 输出 `cert/status/detail` 汇总表，供 Excel/二次比对：
+
+```bash
+python3 run_ocsp_batch.py certs/ --csv results/ocsp_batch.csv
+```
+
 ### 3.2 `check_crl.py` —— CDP 下载 CRL
 
 从证书 CDP（CRL Distribution Points）扩展下载 CRL，DER/PEM 自动识别并统一转成 PEM（校验下载内容确实是 CRL，防 HTML 错误页/误传证书）。拿到的 `crl.pem` 直接喂 `zlint-all-lints` 跑 18 条 CRL 规则。

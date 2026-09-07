@@ -250,6 +250,14 @@ python3 check_ocsp.py                                          # 无参数 → �
 st=$(python3 check_ocsp.py cert.pem --status 2>/dev/null) && echo "状态: $st"
 ```
 
+批量查一批证书（根目录 `run_ocsp_batch.py`，递归收集证书，失败不中断，可选 `--csv` 汇总）：
+
+```bash
+python3 run_ocsp_batch.py certs/                                  # 目录批量
+python3 run_ocsp_batch.py a.pem b.pem certs/ --csv results/ocsp_batch.csv   # 出汇总表
+python3 run_ocsp_batch.py certs/ --timeout 10 --der               # 调超时 / DER 证书
+```
+
 ### 11.2 批量跑 lint 的 Python 封装（run_zlint.py）
 
 ```bash

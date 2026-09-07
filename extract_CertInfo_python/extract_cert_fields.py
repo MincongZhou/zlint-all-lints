@@ -22,20 +22,26 @@ extract_cert_fields.py —— 用 cryptography 解析 X.509 证书的所有字�
     python3 extract_cert_fields.py <证书路径> --json    # 输出结构化 JSON
     python3 extract_cert_fields.py                       # 无参数 → 交互模式
 
-CSV 输出（--csv）:
-    # 单证书 → 字段清单表（field,value 两列，嵌套结构逐层摊平，不丢字段）
-    python3 extract_cert_fields.py certs/baidu.pem --csv baidu_fields.csv
+CSV 输出（--csv），三种模式:
 
-    # 目录/多证书 → 汇总表（每张证书一行，常用字段成列，便于横向对比）
-    python3 extract_cert_fields.py certs/ --csv certs_summary.csv
-    python3 extract_cert_fields.py a.pem b.pem --csv summary.csv
+  fields   每个字段一行，三列 file,field,value（嵌套结构逐层摊平，不丢字段）
+           适合单证书逐字段查看
+           python3 extract_cert_fields.py certs/baidu.pem --csv baidu_fields.csv
 
-    # 显式指定模式：fields（字段清单）/ summary（一行一证书）
-    python3 extract_cert_fields.py certs/ --csv all_fields.csv --csv-mode fields
-    python3 extract_cert_fields.py a.pem --csv one_row.csv --csv-mode summary
+  wide     每行一张证书，基础字段固定列 + 扩展按 OID 命名的列（推荐）
+           另出一张同名的 _extensions.csv 扩展级长表（每行一个扩展，值为完整 JSON）
+           适合完整性检查、对所有证书的某一字段批量测试
+           python3 extract_cert_fields.py certs/ --csv certs_wide.csv
+           → certs_wide.csv（宽表）+ certs_wide_extensions.csv（长表）
 
-模式自动选择规则：单个证书 → fields；目录或多个证书 → summary，
-显式 --csv-mode 优先。fields 模式下 CSV 为三列 file,field,value（每行一个字段）。
+  summary  每行一张证书，仅常用字段成列（约 30 列，比 wide 精简）
+           python3 extract_cert_fields.py certs/ --csv s.csv --csv-mode summary
+
+模式自动选择：单个证书 → fields；目录或多个证书 → wide；显式 --csv-mode 优先。
+wide 模式的扩展列名形如 ext.SUBJECT_ALTERNATIVE_NAME.critical /
+.san_count / .names，用 OID 名而非位置下标，保证同一列在所有证书中语义一致；
+多值（SAN 域名、SCT 列表等）合并进同一单元格（'; ' 分隔），不按位置拆列，
+避免列爆炸与跨证书语义错位；未知 OID 退回完整点分串作列名。
 目录递归查找 .pem/.crt/.cer/.der；非证书文件（如 CRL）自动跳过并告警。
 CSV 统一 UTF-8 with BOM（Excel 双击直接打开不乱码）。
 
@@ -652,8 +658,16 @@ def _parsed(cert_dict, dotted, default=None):
 
 
 def _short_oid(name):
-    """'ExtensionOID.SUBJECT_ALTERNATIVE_NAME' → 'SUBJECT_ALTERNATIVE_NAME'"""
-    return name.split(".")[-1] if isinstance(name, str) else str(name)
+    """OID 的短名，用于列名
+
+    'ExtensionOID.SUBJECT_ALTERNATIVE_NAME' → 'SUBJECT_ALTERNATIVE_NAME'
+    '(unknown) 1.3.6.1.4.1.311.21.10'       → '1.3.6.1.4.1.311.21.10'（未知则退回完整点分串）
+    """
+    if not isinstance(name, str):
+        return str(name)
+    if name.startswith("(unknown) "):
+        return name[len("(unknown) "):].strip()
+    return name.split(".")[-1]
 
 
 def _attr_value(cert_dict, who, suffix):
@@ -733,6 +747,152 @@ def summary_row(file_path, fmt, cert_dict):
     }
 
 
+# 宽表基础列（固定；扩展列在其后按 OID 名动态追加）
+WIDE_BASE_FIELDS = [
+    "file", "format",
+    "version", "serial_dec", "serial_hex",
+    "subject", "subject_cn", "subject_o", "subject_ou", "subject_c",
+    "issuer", "issuer_cn", "issuer_o",
+    "not_before", "not_after", "valid_days",
+    "pubkey_type", "pubkey_bits", "pubkey_curve",
+    "sig_alg", "sig_oid", "sig_hash",
+    "sha256", "sha1",
+    "ext_count",
+]
+
+
+def _flatten_ext_value(obj, prefix=""):
+    """把扩展值摊平成有限列（多值合并进一个单元格，不按位置拆列）
+
+    标量      → 原值
+    标量列表  → <prefix>_count + <prefix>（'; ' 合并）
+    对象列表  → <prefix>_count + 每个子键一列（列内 '; ' 合并）
+    dict      → 递归摊平（键名用 '.' 连接）
+    """
+    out = {}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out.update(_flatten_ext_value(v, f"{prefix}.{k}" if prefix else str(k)))
+    elif isinstance(obj, (list, tuple)):
+        out[f"{prefix}_count"] = len(obj)
+        if not obj:
+            return out
+        scalar = all(i is None or isinstance(i, (str, int, float, bool)) for i in obj)
+        if scalar:
+            out[prefix] = "; ".join(str(i) for i in obj if i is not None)
+        else:
+            keys = []
+            for i in obj:
+                if isinstance(i, dict):
+                    for k in i:
+                        if k not in keys:
+                            keys.append(k)
+            for k in keys:
+                vals = [str(i[k]) for i in obj
+                        if isinstance(i, dict) and i.get(k) is not None]
+                out[f"{prefix}.{k}"] = "; ".join(vals)
+    else:
+        out[prefix] = "" if obj is None else obj
+    return out
+
+
+def wide_row(file_path, fmt, cert_dict):
+    """单张证书 → 宽表一行
+
+    基础字段固定列 + 扩展列按 OID 命名（ext.<OID名>.present/.critical/.<值列>）。
+    扩展列用 OID 名而非位置下标，保证同一列在所有证书中语义一致。
+    """
+    pk = cert_dict.get("public_key", {})
+    sa = cert_dict.get("signature_algorithm", {})
+    val = cert_dict.get("validity", {})
+    fp = cert_dict.get("fingerprints", {})
+    exts = cert_dict.get("extensions", [])
+
+    row = {
+        "file": os.path.basename(file_path),
+        "format": fmt,
+        "version": cert_dict.get("version", {}).get("label", ""),
+        "serial_dec": cert_dict.get("serial_number", {}).get("dec", ""),
+        "serial_hex": cert_dict.get("serial_number", {}).get("hex", ""),
+        "subject": cert_dict.get("subject", {}).get("rfc4514", ""),
+        "subject_cn": _attr_value(cert_dict, "subject", "COMMON_NAME"),
+        "subject_o": _attr_value(cert_dict, "subject", "ORGANIZATION_NAME"),
+        "subject_ou": _attr_value(cert_dict, "subject", "ORGANIZATIONAL_UNIT_NAME"),
+        "subject_c": _attr_value(cert_dict, "subject", "COUNTRY_NAME"),
+        "issuer": cert_dict.get("issuer", {}).get("rfc4514", ""),
+        "issuer_cn": _attr_value(cert_dict, "issuer", "COMMON_NAME"),
+        "issuer_o": _attr_value(cert_dict, "issuer", "ORGANIZATION_NAME"),
+        "not_before": val.get("not_before", ""),
+        "not_after": val.get("not_after", ""),
+        "valid_days": val.get("duration_days", ""),
+        "pubkey_type": pk.get("type", ""),
+        "pubkey_bits": pk.get("bits", ""),
+        "pubkey_curve": pk.get("curve", ""),
+        "sig_alg": sa.get("name", ""),
+        "sig_oid": sa.get("oid", ""),
+        "sig_hash": sa.get("hash_algorithm") or "",
+        "sha256": fp.get("sha256", ""),
+        "sha1": fp.get("sha1", ""),
+        "ext_count": len(exts),
+    }
+
+    for e in exts:
+        base = f"ext.{_short_oid(e.get('name', ''))}"
+        row[f"{base}.present"] = 1
+        row[f"{base}.critical"] = e.get("critical", "")
+        value = e.get("parsed", e.get("raw", e.get("value_hex", "")))
+        if isinstance(value, dict):
+            for k, v in _flatten_ext_value(value).items():
+                row[f"{base}.{k}"] = v
+        else:
+            row[f"{base}.value"] = value if isinstance(value, (str, int, float, bool)) \
+                else jsonify(value)
+    return row
+
+
+def wide_rows(records):
+    """records: [(file, fmt, cert_dict|None, error)] → (rows, fieldnames)
+
+    列名 = 基础列 + 所有证书扩展列的并集（按列名排序） + error
+    """
+    rows = []
+    for file_path, fmt, cert_dict, error in records:
+        if cert_dict is None:
+            rows.append({"file": os.path.basename(file_path), "error": error})
+        else:
+            rows.append(wide_row(file_path, fmt, cert_dict))
+
+    ext_cols = sorted({k for r in rows for k in r if k.startswith("ext.")})
+    return rows, WIDE_BASE_FIELDS + ext_cols + ["error"]
+
+
+def ext_long_rows(records):
+    """扩展级长表：每行一个扩展，值为完整 JSON（字段零丢失，便于按扩展做全量测试）"""
+    rows = []
+    for file_path, _fmt, cert_dict, error in records:
+        if cert_dict is None:
+            rows.append({"file": os.path.basename(file_path), "oid": "",
+                         "name": "", "critical": "", "value_json": "",
+                         "error": error})
+            continue
+        for e in cert_dict.get("extensions", []):
+            value = e.get("parsed", e.get("raw", e.get("value_hex", "")))
+            rows.append({
+                "file": os.path.basename(file_path),
+                "oid": e.get("oid", ""),
+                "name": _short_oid(e.get("name", "")),
+                "critical": e.get("critical", ""),
+                "value_json": json.dumps(value, ensure_ascii=False, default=jsonify),
+            })
+    return rows, ["file", "oid", "name", "critical", "value_json", "error"]
+
+
+def _sibling_path(path, suffix):
+    """给输出文件派生同名副表路径: a/b.csv + '_extensions' → a/b_extensions.csv"""
+    root, ext = os.path.splitext(path)
+    return root + suffix + (ext or ".csv")
+
+
 def write_csv(path, rows, fieldnames):
     """写 CSV；UTF-8 with BOM，Excel 双击打开中文不乱码"""
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
@@ -764,49 +924,72 @@ def expand_inputs(paths):
 def run_batch(paths, der, csv_file, csv_mode=None):
     """批量解析并输出 CSV
 
-    csv_mode: fields（每个字段一行）/ summary（每张证书一行）；
-              为 None 时自动选择（1 个证书 → fields，多个 → summary）
+    csv_mode:
+        fields  —— 每个字段一行（file,field,value），适合单证书逐字段查看
+        summary —— 每张证书一行，常用字段成列（约 30 列）
+        wide    —— 每张证书一行 + 按 OID 命名的全字段列，另出一张扩展级长表
+                   （推荐用于完整性检查、按字段批量测试）
+        为 None 时自动选择：1 个证书 → fields；多个 → wide
     """
     files = expand_inputs(paths)
     if not files:
         print("错误: 未找到任何证书文件（支持 .pem/.crt/.cer/.der）", file=sys.stderr)
         sys.exit(1)
 
-    if csv_mode not in (None, "fields", "summary"):
-        print(f"错误: --csv-mode 只能是 fields 或 summary，收到 {csv_mode!r}",
-              file=sys.stderr)
+    if csv_mode not in (None, "fields", "summary", "wide"):
+        print("错误: --csv-mode 只能是 fields / summary / wide，"
+              f"收到 {csv_mode!r}", file=sys.stderr)
         sys.exit(1)
 
-    mode = csv_mode or ("fields" if len(files) == 1 else "summary")
-    rows = []
-    ok, fail = 0, 0
+    mode = csv_mode or ("fields" if len(files) == 1 else "wide")
 
+    # 先全部解析再出表：wide 模式的列名是所有证书扩展列的并集
+    records = []          # (file, fmt, cert_dict|None, error)
+    ok, fail = 0, 0
     for fp in files:
         try:
             cert, fmt = load_cert(fp, der)
-            cert_dict = parse_cert(cert)
+            records.append((fp, fmt, parse_cert(cert), None))
+            ok += 1
         except Exception as e:  # noqa: BLE001 —— 非证书文件（如 CRL）跳过，不中断
             fail += 1
             print(f"  !! 跳过（解析失败）: {fp} -> {e}", file=sys.stderr)
-            if mode == "summary":
-                rows.append({"file": os.path.basename(fp), "error": str(e)})
-            continue
+            records.append((fp, "", None, str(e)))
 
-        ok += 1
-        if mode == "fields":
+    tail = f"成功 {ok} 个" + (f"，失败 {fail} 个" if fail else "")
+
+    if mode == "fields":
+        rows = []
+        for fp, _fmt, cert_dict, _err in records:
+            if cert_dict is None:
+                continue
             for field, value in flatten(cert_dict):
                 rows.append({"file": os.path.basename(fp),
                              "field": field, "value": value})
-        else:
-            rows.append(summary_row(fp, fmt, cert_dict))
+        write_csv(csv_file, rows, ["file", "field", "value"])
+        print(f"已写入: {csv_file}（模式 fields，{tail}，共 {len(rows)} 行）",
+              file=sys.stderr)
 
-    fieldnames = (["file", "field", "value"] if mode == "fields"
-                  else SUMMARY_FIELDS)
-    write_csv(csv_file, rows, fieldnames)
+    elif mode == "wide":
+        rows, fieldnames = wide_rows(records)
+        write_csv(csv_file, rows, fieldnames)
+        long_path = _sibling_path(csv_file, "_extensions")
+        long_rows, long_fields = ext_long_rows(records)
+        write_csv(long_path, long_rows, long_fields)
+        print(f"已写入: {csv_file}（宽表，{tail}，{len(rows)} 行 × "
+              f"{len(fieldnames)} 列）", file=sys.stderr)
+        print(f"已写入: {long_path}（扩展长表，{len(long_rows)} 行）",
+              file=sys.stderr)
 
-    print(f"已写入: {csv_file}（模式 {mode}，成功 {ok} 个"
-          f"{'，失败 ' + str(fail) + ' 个' if fail else ''}，共 {len(rows)} 行）",
-          file=sys.stderr)
+    else:                  # summary
+        rows = []
+        for fp, fmt, cert_dict, error in records:
+            rows.append({"file": os.path.basename(fp), "error": error}
+                        if cert_dict is None
+                        else summary_row(fp, fmt, cert_dict))
+        write_csv(csv_file, rows, SUMMARY_FIELDS)
+        print(f"已写入: {csv_file}（模式 summary，{tail}，共 {len(rows)} 行）",
+              file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -876,7 +1059,7 @@ def interactive():
 
     csv_out = os.path.expanduser(input("CSV 输出文件 (回车跳过): ").strip())
     if csv_out:
-        mode = input("CSV 模式 (回车自动 / fields / summary): ").strip().lower() or None
+        mode = input("CSV 模式 (回车自动 / fields / wide / summary): ").strip().lower() or None
         run_batch([cert_path], der, csv_out, mode)
         return
 

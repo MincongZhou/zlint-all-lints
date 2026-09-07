@@ -151,6 +151,15 @@ python3 check_ocsp.py                          # 无参数 → 交互模式
 - `--respout <文件>`：把 responder 返回的**原始 OCSP 响应(DER)** 保存到文件，供 zlint 跑 OCSP 规则：`zlint -format der -longSummary resp.der`（或 `./zlint-all-lints -cert resp.der`）
 - `--status` 模式：stdout 只输出 `GOOD` / `REVOKED`（带吊销时间）/ `UNKNOWN`，错误走 stderr + 非零退出码，便于管道和脚本化调用
 
+**`run_ocsp_batch.py`**（根目录）：`check_ocsp.py` 的批量封装——目录递归收集证书逐张查状态，失败不中断；可选 `--csv` 输出汇总表（`cert/status/detail` 三列，utf-8-sig 便于 Excel）：
+
+```bash
+python3 run_ocsp_batch.py certs/                                  # 目录批量
+python3 run_ocsp_batch.py a.pem b.pem certs/ --csv results/ocsp_batch.csv
+python3 run_ocsp_batch.py certs/ --timeout 10 --der               # 调超时 / DER 证书
+python3 run_ocsp_batch.py                                         # 无参数 → 交互模式
+```
+
 **`check_crl.py`**：从证书 CDP（CRL Distribution Points）扩展下载 CRL，DER/PEM 自动识别并统一转成 PEM，供 zlint 跑 18 条 CRL 规则
 
 ```bash
@@ -194,23 +203,45 @@ python3 run_zlint.py                            # 无参数 → 交互模式
 |------|------|------|
 | `extract_sct.py` | 提取证书里的 SCT（证书透明度时间戳）：log_id / timestamp / 签名算法 | `python3 extract_sct.py <证书> [--der]` |
 | `extract_org.py` | 提取证书**主体（subject）与签发者（issuer）**的组织名（O 字段）及各自 DN | `python3 extract_org.py <证书> [--der]` |
-| `extract_cert_fields.py` | 用 cryptography 解析证书**所有字段**：版本/序列号/签名算法/签发者/有效期/主体逐条属性/公钥参数/签名值/指纹，及**全部扩展**逐项结构化解析（SAN/IAN、KU/EKU、BasicConstraints、SKI/AKI、AIA、CDP、策略与约束、SCT、未知扩展 hex 原文…） | `python3 extract_cert_fields.py <证书> [--der] [--json] [--out 文件]`<br>`--csv 文件`：单证书→字段清单表，目录/多证书→一行一证书汇总表 |
+| `extract_cert_fields.py` | 用 cryptography 解析证书**所有字段**：版本/序列号/签名算法/签发者/有效期/主体逐条属性/公钥参数/签名值/指纹，及**全部扩展**逐项结构化解析（SAN/IAN、KU/EKU、BasicConstraints、SKI/AKI、AIA、CDP、策略与约束、SCT、未知扩展 hex 原文…） | `python3 extract_cert_fields.py <证书> [--der] [--json] [--out 文件]`<br>`--csv 文件`：单证书→字段清单表，目录/多证书→wide 宽表（另出扩展长表） |
 | `openssl_script.py` | 调用 `openssl x509` 提取 subject / issuer / 有效期 | 交互输入证书路径 |
 
 > 提示：`extract_sct.py` 需要 `cryptography >= 42.0`（原生支持 CT Precertificate SCTs 扩展解析）。
 
-**`extract_cert_fields.py --csv` 的两种模式**（自动选择：单个证书 → `fields`，目录/多证书 → `summary`；`--csv-mode fields|summary` 可显式指定）：
+**`extract_cert_fields.py --csv` 的三种模式**（自动选择：单个证书 → `fields`，目录/多证书 → `wide`；`--csv-mode fields|wide|summary` 可显式指定）：
 
 ```bash
-python3 extract_CertInfo_python/extract_cert_fields.py certs/baidu.pem --csv baidu_fields.csv          # 字段清单
-python3 extract_CertInfo_python/extract_cert_fields.py certs/ --csv certs_summary.csv                  # 多证书汇总
-python3 extract_CertInfo_python/extract_cert_fields.py certs/ --csv all_fields.csv --csv-mode fields   # 强制字段清单
+# fields：每个字段一行，三列 file,field,value（嵌套结构逐层摊平，不丢字段）
+python3 extract_CertInfo_python/extract_cert_fields.py certs/baidu.pem --csv baidu_fields.csv
+
+# wide（推荐）：每行一张证书 + 按 OID 命名的全字段列，另出一张扩展级长表
+python3 extract_CertInfo_python/extract_cert_fields.py certs/ --csv certs_wide.csv
+#   → certs_wide.csv（宽表）+ certs_wide_extensions.csv（长表，每行一个扩展，值为完整 JSON）
+
+# summary：每行一张证书，仅常用字段成列（比 wide 精简）
+python3 extract_CertInfo_python/extract_cert_fields.py certs/ --csv s.csv --csv-mode summary
 ```
 
+- **`wide` 模式的列怎么命名**（关键：用 OID 名而非位置下标，保证同一列在所有证书中语义一致）
+  - 基础列固定 26 个：`file / format / version / serial_dec / serial_hex / subject(+cn,o,ou,c) / issuer(+cn,o) / not_before / not_after / valid_days / pubkey_type / pubkey_bits / pubkey_curve / sig_alg / sig_oid / sig_hash / sha256 / sha1 / ext_count`
+  - 扩展列形如 `ext.SUBJECT_ALTERNATIVE_NAME.present` / `.critical` / `.names_count` / `.names`；未知 OID 退回完整点分串（如 `ext.1.3.6.1.4.1.311.21.10.value_hex`）
+  - 多值（SAN 域名、SCT 列表、AIA 地址等）**合并进同一单元格**（`; ` 分隔）并另给 `_count` 列，不按位置拆列，避免列爆炸与跨证书语义错位
+  - 实测 10 张真实证书：98 列（基础 26 + 扩展 72），填充率 76%；同样数据若按位置完全展平则是 343 列、填充率仅 40%
 - `fields` 模式：三列 `file,field,value`，每个字段一行，嵌套结构逐层摊平（如 `cert.extensions[4].parsed.names[1]` → `DNS: baidu.com`），不丢任何字段
-- `summary` 模式：每张证书一行，常用字段成列（文件名、subject/CN/O、issuer、有效期与天数、公钥类型与位数、签名算法、是否 CA、KU/EKU、SAN 域名、AIA OCSP、CDP、策略、SCT 数、扩展数、SHA-256）
+- `summary` 模式：每张证书一行，常用字段成列（约 30 列：subject/CN/O、issuer、有效期与天数、公钥、签名算法、是否 CA、KU/EKU、SAN 域名、AIA OCSP、CDP、策略、SCT 数、扩展数、SHA-256）
 - 目录递归查找 `.pem/.crt/.cer/.der`；非证书文件（CRL/OCSP 响应）自动跳过并在 CSV 中留一行 `error` 说明，不中断整体
 - CSV 为 UTF-8 with BOM，Excel 双击打开中文不乱码
+
+典型用途（配合 Excel 筛选或 `csv`/pandas 处理）：
+
+```python
+import csv
+rows = list(csv.DictReader(open("certs_wide.csv", encoding="utf-8-sig")))
+# 完整性检查：哪些证书缺 CRL 分发点
+[x["file"] for x in rows if not x["ext.CRL_DISTRIBUTION_POINTS.present"]]
+# 按字段批量测试：所有 ECDSA 证书
+[x["file"] for x in rows if x["pubkey_type"] == "ECDSA"]
+```
 
 ### run_all.sh / run_all.py —— 一键跑完 4 个分析脚本
 

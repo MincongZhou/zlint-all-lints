@@ -22,3 +22,12 @@ __pycache__/
 
 # 证书样例目录
 /certs/
+
+# 编辑器 / IDE
+.vscode/
+
+# 根目录 CSV 运行产物（extract_cert_fields 各模式输出 / 批量 OCSP 查询）
+/all.csv
+/all_extensions.csv
+/*_fields.csv
+/oscp_all.csv
