@@ -245,6 +245,7 @@ python3 check_ocsp.py                                          # 无参数 → �
 
 - 未传签发者证书时，自动从证书 AIA 的 CA Issuers 地址下载；http 失败自动兜底 https 并重试
 - `--status` 模式 stdout 只输出状态（REVOKED 时带吊销时间），错误走 stderr，适合脚本化调用：
+- CertID 摘要默认 **SHA-1**（同 `openssl ocsp`，兼容性最好）；DigiCert / 微软等 responder 不接受 SHA-256 CertID，个别只支持 SHA-256 的 responder 才用 `--sha256`
 
 ```bash
 st=$(python3 check_ocsp.py cert.pem --status 2>/dev/null) && echo "状态: $st"

@@ -95,6 +95,8 @@ python3 extract_CertInfo_python/extract_sct.py certs/baidu.pem     # 需要 cryp
 st=$(python3 check_ocsp.py cert.pem --status 2>/dev/null) && echo "$st"
 ```
 
+CertID 摘要默认 **SHA-1**（同 `openssl ocsp`）。此前用 SHA-256 会让 DigiCert / 微软等 responder 回 `MALFORMED_REQUEST` / `UNAUTHORIZED`——实测 openssl 与 SHA-1 请求均正常（GOOD）；个别仅支持 SHA-256 的 responder 用 `--sha256`。
+
 `--respout <文件>` 把 responder 返回的**原始 OCSP 响应 (DER)** 存下来，可再喂 `zlint-all-lints` 跑那 1 条 OCSP 规则。
 
 批量查询用根目录的 `run_ocsp_batch.py`（`check_ocsp.py` 的封装）：目录递归收集证书逐张查状态、失败不中断，可 `--csv` 输出 `cert/status/detail` 汇总表，供 Excel/二次比对：

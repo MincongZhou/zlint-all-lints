@@ -7,9 +7,10 @@ run_ocsp_batch.py —— 批量跑 check_ocsp.py，对每个证书联网查询 O
 可选 --csv 输出一张汇总表（cert / status / detail 三列），方便 Excel 打开。
 
 用法:
-    python3 run_ocsp_batch.py <证书文件|证书目录> [更多...] [--csv 输出.csv] [--timeout 秒] [--der]
+    python3 run_ocsp_batch.py <证书文件|证书目录> [更多...] [--csv 输出.csv] [--timeout 秒] [--der] [--sha256]
     python3 run_ocsp_batch.py certs/ --csv results/ocsp_batch.csv --timeout 10
     python3 run_ocsp_batch.py a.pem b.pem c.pem --der
+    python3 run_ocsp_batch.py certs/ --sha256       # CertID 用 SHA-256（默认 SHA-1，兼容性最好）
     python3 run_ocsp_batch.py                        # 无参数 → 交互模式
 
 状态取值: GOOD / REVOKED / UNKNOWN（查询成功）；ERROR（无 OCSP 地址、
@@ -53,13 +54,15 @@ def collect_certs(paths):
     return sorted(set(certs))
 
 
-def query_one(cert_path, timeout=15, der=False):
+def query_one(cert_path, timeout=15, der=False, sha256=False):
     """调用 check_ocsp.py --status 查询单张证书。
     返回 (status, detail)：status ∈ GOOD/REVOKED/UNKNOWN/ERROR"""
     cmd = [sys.executable, CHECK_OCSP, cert_path, "--status",
            "--timeout", str(timeout)]
     if der:
         cmd.append("--der")
+    if sha256:
+        cmd.append("--sha256")
     proc = subprocess.run(cmd, capture_output=True, text=True)
 
     if proc.returncode == 0:
@@ -91,7 +94,7 @@ def write_csv(path, results):
             wr.writerow([cert, status, detail])
 
 
-def batch(paths, csv_path=None, timeout=15, der=False):
+def batch(paths, csv_path=None, timeout=15, der=False, sha256=False):
     """批量主流程，返回退出码"""
     if not os.path.isfile(CHECK_OCSP):
         err(f"找不到 {CHECK_OCSP}")
@@ -105,7 +108,7 @@ def batch(paths, csv_path=None, timeout=15, der=False):
 
     results = []
     for i, cert in enumerate(certs, 1):
-        status, detail = query_one(cert, timeout, der)
+        status, detail = query_one(cert, timeout, der, sha256)
         results.append((cert, status, detail))
         print_result(i, len(certs), cert, status, detail)
 
@@ -161,12 +164,14 @@ def main():
                     help="把结果写入 CSV 汇总表（cert/status/detail 三列）")
     ap.add_argument("--timeout", type=int, default=15, help="每张证书超时秒数 (默认 15)")
     ap.add_argument("--der", action="store_true", help="证书按 DER 优先解析")
+    ap.add_argument("--sha256", action="store_true",
+                    help="CertID 摘要用 SHA-256（默认 SHA-1，兼容性最好）")
     args = ap.parse_args()
 
     if not args.paths:          # 无任何路径 → 交互模式
         interactive()
         return
-    sys.exit(batch(args.paths, args.csv_path, args.timeout, args.der))
+    sys.exit(batch(args.paths, args.csv_path, args.timeout, args.der, args.sha256))
 
 
 if __name__ == "__main__":

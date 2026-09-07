@@ -11,12 +11,15 @@ check_ocsp.py —— 用 Python 联网查询证书的 OCSP 状态
     4. 解析响应，输出 GOOD / REVOKED / UNKNOWN
 
 用法:
-    python3 check_ocsp.py <证书路径> [签发者证书路径] [--der] [--timeout 秒] [--respout 文件]
+    python3 check_ocsp.py <证书路径> [签发者证书路径] [--der] [--timeout 秒] [--respout 文件] [--sha256]
     python3 check_ocsp.py <证书路径> --status        # 只输出状态，静默其他信息
     python3 check_ocsp.py                            # 无参数 → 交互模式
 
     --respout <文件>: 把 responder 返回的原始 OCSP 响应(DER)保存到文件，
                       供 zlint 跑 OCSP 规则 (zlint -format der -longSummary <文件>)
+    --sha256:  CertID 摘要用 SHA-256（默认 SHA-1，与 openssl ocsp 一致）。
+               多数 responder（DigiCert / 微软等）只认 SHA-1，用 SHA-256 会返回
+               MALFORMED_REQUEST / UNAUTHORIZED；仅个别要求 SHA-256 的 responder 才需要此开关。
     证书/签发者证书均为 PEM/DER 自动识别；--der 仅表示优先按 DER 解析，失败自动回退。
 
 注意:
@@ -116,14 +119,17 @@ def load_issuer(issuer_path, cert, ca_issuers_url, quiet=False):
     raise RuntimeError("未提供签发者证书，且证书 AIA 中没有 CA Issuers 地址")
 
 
-def query_ocsp(cert, issuer, ocsp_url, timeout=15, quiet=False, respout=None):
-    """构造 OCSP 请求 → POST → 返回响应对象；http 失败自动试 https，失败重试"""
+def query_ocsp(cert, issuer, ocsp_url, timeout=15, quiet=False, respout=None,
+               hash_alg=hashes.SHA1()):
+    """构造 OCSP 请求 → POST → 返回响应对象；http 失败自动试 https，失败重试
+    hash_alg 是 CertID 摘要算法：默认 SHA-1（与 openssl ocsp 相同，兼容性最好，
+    DigiCert / 微软等 responder 不接受 SHA-256 的 CertID）"""
     urls = [ocsp_url]
     if ocsp_url.startswith("http://"):
         urls.append("https://" + ocsp_url[len("http://"):])
 
     der = (ocsp.OCSPRequestBuilder()
-           .add_certificate(cert, issuer, hashes.SHA256())
+           .add_certificate(cert, issuer, hash_alg)
            .build().public_bytes(serialization.Encoding.DER))
 
     last_err = None
@@ -162,7 +168,7 @@ def query_ocsp(cert, issuer, ocsp_url, timeout=15, quiet=False, respout=None):
 
 
 def check_cert(cert_path, issuer_path=None, der=False, status_only=False, timeout=15,
-               respout=None):
+               respout=None, hash_alg=hashes.SHA1()):
     """加载证书并查询 OCSP，输出结果；失败时按模式输出错误并退出"""
     cert_path = os.path.expanduser(cert_path)
     if issuer_path:
@@ -198,7 +204,7 @@ def check_cert(cert_path, issuer_path=None, der=False, status_only=False, timeou
 
     try:
         response = query_ocsp(cert, issuer, ocsp_url, timeout, quiet=status_only,
-                              respout=respout)
+                              respout=respout, hash_alg=hash_alg)
     except Exception as e:
         if status_only:
             print(f"ERROR: OCSP 查询失败: {e}", file=sys.stderr)
@@ -308,8 +314,9 @@ def main():
             print("错误: --respout 需要文件路径参数", file=sys.stderr)
             sys.exit(1)
         respout = args[i + 1]
+    hash_alg = hashes.SHA256() if "--sha256" in args else hashes.SHA1()
 
-    check_cert(cert_path, issuer_path, der, status_only, timeout, respout)
+    check_cert(cert_path, issuer_path, der, status_only, timeout, respout, hash_alg)
 
 
 if __name__ == "__main__":

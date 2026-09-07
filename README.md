@@ -150,6 +150,7 @@ python3 check_ocsp.py                          # 无参数 → 交互模式
 - 证书/签发者证书 PEM/DER 自动识别，`--der` 只表示优先按 DER 解析，标错也会自动回退
 - `--respout <文件>`：把 responder 返回的**原始 OCSP 响应(DER)** 保存到文件，供 zlint 跑 OCSP 规则：`zlint -format der -longSummary resp.der`（或 `./zlint-all-lints -cert resp.der`）
 - `--status` 模式：stdout 只输出 `GOOD` / `REVOKED`（带吊销时间）/ `UNKNOWN`，错误走 stderr + 非零退出码，便于管道和脚本化调用
+- CertID 摘要默认 **SHA-1**（与 `openssl ocsp` 一致，兼容性最好）；部分 responder（DigiCert / 微软等）不接受 SHA-256 的 CertID，会回 `MALFORMED_REQUEST` / `UNAUTHORIZED`，个别仅支持 SHA-256 的 responder 才用 `--sha256`
 
 **`run_ocsp_batch.py`**（根目录）：`check_ocsp.py` 的批量封装——目录递归收集证书逐张查状态，失败不中断；可选 `--csv` 输出汇总表（`cert/status/detail` 三列，utf-8-sig 便于 Excel）：
 
