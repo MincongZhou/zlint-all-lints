@@ -49,6 +49,10 @@ CHECK_OCSP = os.path.join(PROJECT_ROOT, "check_certs_python", "check_ocsp.py")
 EXTRACT_ORG = os.path.join(PROJECT_ROOT, "extract_CertInfo_python", "extract_org.py")
 EXTRACT_SCT = os.path.join(PROJECT_ROOT, "extract_CertInfo_python", "extract_sct.py")
 
+# 组织名改为直接 import 调用（不再起子进程、不再正则解析 stdout），其余脚本仍走子进程
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "extract_CertInfo_python"))
+import extract_org  # noqa: E402  —— 需先插入 sys.path，故放在常量区之后
+
 SHEET_ZLINT = "zlint"
 SHEET_ORG = "组织名"
 SHEET_SCT = "SCT时间"
@@ -83,25 +87,24 @@ def run_zlint(tmp_dir, out_dir, stem):
 
 
 # --------------------------------------------------------------------------
-# 步骤 2: extract_org.py —— 解析 stdout 得到 subject 与 O 字段
+# 步骤 2: 组织名 —— 直接调用 extract_org.get_org_info()
 # --------------------------------------------------------------------------
 def run_extract_org(cert_path, der_args):
-    proc = subprocess.run(
-        [sys.executable, EXTRACT_ORG, cert_path] + der_args,
-        capture_output=True, text=True)
-    print(proc.stdout, end="")
-    if proc.returncode != 0:
-        err(f"extract_org.py 失败: {proc.stderr.strip()}")
-        return [], proc.returncode
+    """直接 import 调用（不起子进程、不解析 stdout），返回 (rows, exit_code)"""
+    try:
+        info = extract_org.get_org_info(cert_path, der="--der" in der_args)
+    except Exception as e:  # noqa: BLE001 —— 文件不存在 / 解析失败均记为步骤失败
+        err(f"extract_org 失败: {e}")
+        return [], 1
 
-    subject = orgs = ""
-    m = re.search(r"^subject:\s*(.+)$", proc.stdout, re.M)
-    if m:
-        subject = m.group(1).strip()
-    m = re.search(r"^O 字段:\s*(.+)$", proc.stdout, re.M)
-    if m:
-        orgs = m.group(1).strip()
-    rows = [["type", "subject", "组织名"], [SHEET_ORG, subject, orgs]]
+    print(f"subject: {info['subject']}")
+    print(f"O 字段:  {info['orgs_str']}")
+    print(f"issuer:  {info['issuer']}")
+    print(f"签发者 O 字段: {info['issuer_orgs_str']}")
+    # 列名「type」「组织名」被 build_master 按名查找，勿改名；新增列不影响汇总表
+    rows = [["type", "subject", "组织名", "issuer", "签发者组织名"],
+            [SHEET_ORG, info["subject"], info["orgs_str"],
+             info["issuer"], info["issuer_orgs_str"]]]
     return rows, 0
 
 
@@ -249,7 +252,7 @@ def run_one(cert_path, out_dir=None):
         results.append((SHEET_ZLINT, rows, rc))
         ok &= rc == 0 and len(rows) > 1
 
-        print("\n===== [2/4] extract_org.py（组织名 O 字段） =====")
+        print("\n===== [2/4] 组织名 O 字段（extract_org 直接调用） =====")
         rows, rc = run_extract_org(cert_path, der_args)
         results.append((SHEET_ORG, rows, rc))
         ok &= rc == 0

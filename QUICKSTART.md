@@ -271,7 +271,7 @@ python3 extract_CertInfo_python/extract_sct.py cert.der --der  # DER
 ### 11.4 提取组织名 / 简单字段提取
 
 ```bash
-python3 extract_CertInfo_python/extract_org.py cert.pem        # 输出 subject 与组织名（O 字段）
+python3 extract_CertInfo_python/extract_org.py cert.pem        # 输出 subject / issuer 及两者的组织名（O 字段）
 python3 extract_CertInfo_python/openssl_script.py              # 交互式：openssl 提取字段
 ```
 
@@ -374,6 +374,7 @@ python3 check_certs_python/ct_audit/parse_sct.py certs/baidu.pem
 python3 check_certs_python/ct_audit/verify_sct.py cert.pem issuer.crt
 # L3 日志存活性: get-sth + 日志公钥验 STH 签名（联网），记录 tree_size
 python3 check_certs_python/ct_audit/ct_log_liveness.py cert.pem
+python3 check_certs_python/ct_audit/ct_log_liveness.py cert.pem --sth-out sth_audit.json   # STH 原文落盘取证（审计时点/证书指纹/逐日志 STH）
 # 自动化时间交叉核验: SCT 时间戳 × 有效期 × 审计时点 × 日志 temporal_interval
 python3 check_certs_python/ct_audit/check_ct_temporal.py certs/ --csv ct_temporal.csv
 ```

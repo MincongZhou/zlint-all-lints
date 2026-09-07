@@ -19,8 +19,9 @@ check_ct_temporal.py —— 交叉核验 SCT 时间戳 × 证书有效期 × 日
 判定结论(verdict, 逐 SCT):
   - PASS        : 该 SCT 时间与证书有效期/审计时点/日志时间域全部自洽
   - 不一致      : SCT 时间戳存在硬伤(晚于审计时点 / 晚于 notAfter /
-                  早于 notBefore 超窗口)或落在日志 temporal_interval 之外
-  - 观察        : 非硬伤但需人工确认(日志未匹配/非 usable/略早于 notBefore)
+                  早于/晚于 notBefore 超容忍窗口)或落在日志 temporal_interval 之外
+  - 观察        : 非硬伤但需人工确认(日志未匹配/非 usable/略早于 notBefore/
+                  SCT 晚于 notBefore 超 1h)
 证书级另附: 无 SCT 扩展 / SCT 数量不足(2018-04-30 后签发要求 >=2)
 
 用法:
@@ -38,6 +39,11 @@ check_ct_temporal.py —— 交叉核验 SCT 时间戳 × 证书有效期 × 日
     --preissue-window <秒>
                        SCT 早于 notBefore 的容忍窗口, 默认 86400(24h);
                        窗口内判"观察", 超出判"不一致"(预签发/backdate 需人工)
+    --backdate-window <秒>
+                       SCT 晚于 notBefore 的容忍窗口, 默认 172800(48h,
+                       Chrome Root Program 上限); 超窗口判"不一致"
+                       (backdate/时间回拨嫌疑), 1h~窗口内判"观察",
+                       1h 内为常见正常不报告
     --csv <文件>       汇总导出 CSV(逐 SCT 一行 + 无 SCT 证书占一行)
     --quiet            每张证书只打印一行结论(批量自动打开)
     --no-ocsp          无意义占位, 仅保持与 check_* 家族 CLI 习惯一致(忽略)
@@ -169,12 +175,12 @@ def build_log_map(data):
 
 # ---------- 单 SCT 判定 ----------
 
-def judge_sct(sct, cert, now, tol, window):
+def judge_sct(sct, cert, now, tol, window, bd_window):
     """对单个 SCT 做时间交叉核验。
-    返回 (verdict, issues): verdict ∈ PASS/观察/不一致; issues 为说明列表"""
-    issues = []
+    返回 (ts_dt, issues): issues 列表项以"不一致"/"观察"开头由调用方归类"""
     ts = sct["timestamp"] / 1000.0          # RFC 6962 时间戳单位=毫秒
     ts_dt = datetime.datetime.fromtimestamp(ts, tz=UTC)
+    issues = []
     nb = utc(cert.not_valid_before_utc)
     na = utc(cert.not_valid_after_utc)
 
@@ -196,6 +202,22 @@ def judge_sct(sct, cert, now, tol, window):
             issues.append(
                 f"观察: SCT 时间戳略早于 notBefore {early/60:.0f} 分钟"
                 f"(签发窗口内, 正常)")
+    # 4) SCT 晚于 notBefore: 流程上 SCT(日志收录 precert 时刻) ≤ 签发时刻,
+    #    而 Chrome Root Program 要求 notBefore 不得早于签发时刻超 48h,
+    #    故 SCT 晚于 notBefore 超容忍窗口 = 证书在日志收录前就"生效"
+    #    (backdate/时间回拨嫌疑); 1h 内为常见正常(CA 常把 notBefore 设在
+    #    签发前几分钟), 1h~窗口内判观察, 超窗口判不一致
+    if nb is not None:
+        late = (ts_dt - nb).total_seconds()
+        if late > bd_window:
+            issues.append(
+                f"不一致: SCT 时间戳晚于证书 notBefore({iso(nb)}) 达 "
+                f"{late/3600:.0f} 小时(超 {bd_window/3600:.0f}h 容忍, "
+                f"backdate/时间回拨嫌疑, 需人工确认)")
+        elif late > 3600:
+            issues.append(
+                f"观察: SCT 时间戳晚于 notBefore {late/3600:.1f} 小时"
+                f"(政策上限内但偏大, 建议核对实际签发时间)")
     return ts_dt, issues
 
 
@@ -231,7 +253,7 @@ def judge_log(sct, log, ts_dt):
 
 # ---------- 单证书分析 ----------
 
-def analyze_one(cert_path, log_map, now, tol, window, quiet):
+def analyze_one(cert_path, log_map, now, tol, window, bd_window, quiet):
     """对单张证书提取 SCT 并逐条核验。返回汇总 dict 与 SCT 级 CSV rows"""
     base = os.path.basename(cert_path)
     row = {"cert": base, "subject": "", "serial_hex": "",
@@ -294,7 +316,7 @@ def analyze_one(cert_path, log_map, now, tol, window, quiet):
     for i, sct in enumerate(scts, 1):
         lid = sct["log_id"]
         log = log_map.get(lid)
-        ts_dt, t_issues = judge_sct(sct, cert, now, tol, window)
+        ts_dt, t_issues = judge_sct(sct, cert, now, tol, window, bd_window)
         l_level, l_issues = judge_log(sct, log, ts_dt)
 
         sct_mismatch = any(x.startswith("不一致") for x in t_issues) or \
@@ -399,6 +421,9 @@ def main():
                     help="SCT 晚于审计时点容差秒数(默认 300)")
     ap.add_argument("--preissue-window", type=int, default=86400,
                     help="SCT 早于 notBefore 容忍窗口秒数(默认 86400=24h)")
+    ap.add_argument("--backdate-window", type=int, default=172800,
+                    help="SCT 晚于 notBefore 容忍窗口秒数(默认 172800=48h, "
+                         "Chrome Root Program 上限; 超窗口判不一致)")
     ap.add_argument("--csv", help="汇总导出 CSV(逐 SCT 一行)")
     ap.add_argument("--quiet", action="store_true", help="每张证书只打一行结论")
     args = ap.parse_args()
@@ -426,7 +451,8 @@ def main():
     for c in certs:
         try:
             r = analyze_one(c, log_map, now, args.tolerance,
-                            args.preissue_window, args.quiet)
+                            args.preissue_window, args.backdate_window,
+                            args.quiet)
         except Exception as e:
             r = {"cert": os.path.basename(c), "subject": "", "serial_hex": "",
                  "notBefore": "", "notAfter": "", "sct_count": 0,

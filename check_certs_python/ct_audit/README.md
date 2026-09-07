@@ -15,7 +15,7 @@
 |---|---|
 | `parse_sct.py` | L1：DER 级提取 SCT 列表并解析（log_id / timestamp / 算法），匹配 log list 快照 |
 | `verify_sct.py` | L2：RFC 6962 §3.2 密码学验签（重建 defanged precert TBS） |
-| `ct_log_liveness.py` | L3：逐日志 `get-sth` + 日志公钥验 STH 签名（RFC 6962 §3.5） |
+| `ct_log_liveness.py` | L3：逐日志 `get-sth` + 日志公钥验 STH 签名（RFC 6962 §3.5）；`--sth-out` 把 STH 原文落盘取证 |
 | `check_ct_temporal.py` | 自动化时间交叉核验（批量目录 + `--csv` 汇总） |
 | `samples/` | 演示与证据：baidu（GlobalSign 2018 签发）+ LE 对照组 + 签发者 + **log list v3 快照**（v90.1，2026-09-01T13:39:01Z） |
 
@@ -35,6 +35,8 @@ python3 verify_sct.py samples/le_leaf.pem samples/le_issuer.pem   # LE 对照组
 
 # L3 存活性（联网 get-sth + STH 验签）
 python3 ct_log_liveness.py [证书.pem]
+# L3 + 取证：把审计时点抓取的 STH 原文（tree_size/时间/根哈希/签名）落盘为 JSON
+python3 ct_log_liveness.py samples/baidu_new.pem --sth-out sth_audit_2026-09-02.json
 
 # 时间交叉核验（单张 / 目录批量 / CSV 汇总）
 python3 check_ct_temporal.py samples/baidu_new.pem
@@ -63,6 +65,9 @@ python3 check_ct_temporal.py cert.pem --offline      # 无快照时报错，不�
 **L3（存活性 / 密钥持有）** —— STH 验签通过 = 日志在线且持有签发 SCT 的同一私钥；
 STH 时间接近审计时点（分钟级）表明持续签发；记录 tree_size 供后续
 `get-proof-by-hash` inclusion 复核（RFC 6962 §4.5）。
+取证建议：STH 与 log list 一样是时敏证据，审计应把 STH 原文落盘
+（`--sth-out <文件>`，含审计时点/证书指纹/逐日志 STH），事后可随时用
+同一日志公钥复验该 STH 签名，证明"这个时点日志确实活着、树有多大"。
 
 **check_ct_temporal.py（时间交叉核验）** —— 逐 SCT 输出：
 - `不一致`（退出码 1）：SCT 晚于审计时点（容差默认 5 分钟）/
@@ -77,5 +82,5 @@ STH 时间接近审计时点（分钟级）表明持续签发；记录 tree_size
 |---|---|---|
 | O1（方法学） | 全部 | precert 验签重建"只删 SCT 扩展不插 poison + CtExtensions 原样拼接"，已固化为 verify_sct.py |
 | O2（待复核） | baidu | 3 个 SCT 时间戳（2026-07-09）均早于三条日志在**审计时点快照**的 `temporal_interval` 起点（2027-01-01）；SCT 验签通过（时间戳在签名输入内不可能错）→ 发证时点 log list 区间或与现在不同，需向 CA/日志运营方质询；对照组 LE 无此问题 |
-| O3（证据管理） | 全部 | log list 是时敏证据，本目录已留审计时点快照 `samples/log_list_v3_snapshot.json`；签发/审计时应每次都留存 |
+| O3（证据管理） | 全部 | log list 是时敏证据，本目录已留审计时点快照 `samples/log_list_v3_snapshot.json`；签发/审计时应每次都留存。STH 同理：`ct_log_liveness.py --sth-out` 把每次审计抓取的 STH 原文落盘归档 |
 | O4（环境限制） | IPng Gouda2026h2 | get-sth 端点从部分环境 TLS 不可达，属网络限制非 SCT 问题；建议具备直连条件的环境复核存活性 |
