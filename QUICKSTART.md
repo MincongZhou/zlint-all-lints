@@ -259,6 +259,8 @@ python3 run_ocsp_batch.py a.pem b.pem certs/ --csv results/ocsp_batch.csv   # �
 python3 run_ocsp_batch.py certs/ --timeout 10 --der               # 调超时 / DER 证书
 ```
 
+交互模式多个路径建议用**逗号分隔**；含空格的路径可用引号包裹（不加引号也能自动识别），兼容中文引号。
+
 ### 11.2 批量跑 lint 的 Python 封装（run_zlint.py）
 
 ```bash
@@ -337,6 +339,7 @@ python3 run_cert_crl_ocsp.py certs --detail            # 保留每证书完整�
 
 - 默认精简：每证书三侧结果合并进输出根下的 `ca_summary.csv` / `crl_summary.csv` / `ocsp_summary.csv`（首列 cert 为证书名），中间 JSON/CSV 随跑随删，只保留联网证据 `crl.pem` / `resp.der`
 - 证书侧 `zlint-all-lints`（CA 414 条）；CRL 侧由 `check_crl.py` 下载后跑 18 条；OCSP 侧由 `check_ocsp.py` 查询并存 DER 响应后跑 1 条
+- 批量时重名证书文件自动加父目录前缀（`__` 连接）区分（如 `chain-20260611__CFCA DV OCA`），子目录名与汇总表 cert 列同用，不会互相覆盖
 - CRL/OCSP 联网失败（无 CDP / 无 OCSP 地址 / 网络不通）自动跳过对应侧，不中断整体
 
 ### 11.9 沿 issuer 追到根证书（find_cert_root.py）
@@ -347,6 +350,7 @@ python3 run_cert_crl_ocsp.py certs --detail            # 保留每证书完整�
 python3 find_cert_root_python/find_cert_root.py certs/baidu.pem --download   # 允许联网：AIA 下载缺的中间 CA，根由信任库自签根兜底
 python3 find_cert_root_python/find_cert_root.py cert.pem --pool ca_dir       # 本地证书池找上级
 python3 find_cert_root_python/find_cert_root.py cert.pem --trust cacert.pem  # 指定信任库 bundle
+python3 find_cert_root_python/find_cert_root.py certs/ --download --csv results/cert_roots.csv  # 目录批量 + 汇总 CSV
 ```
 
 - 重复"issuer DN 匹配 + 验签"直到自签根；`--pool` 支持目录递归（`.pem/.crt/.cer/.der`），PEM/DER 自动识别

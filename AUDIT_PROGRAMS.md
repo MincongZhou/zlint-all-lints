@@ -59,7 +59,8 @@ zlint 对单个输入只真实执行其所属类型的规则，其余标 `NA`。
 
 - 证书侧：`zlint-all-lints`；CRL 侧：`check_crl.py` 下载转 PEM 后跑；OCSP 侧：`check_ocsp.py` 查询存 DER 后跑；
 - 任一联网侧失败（无 CDP/无 OCSP/网络不通）自动跳过，不中断整体；
-- 产物：`ca_summary.csv` / `crl_summary.csv` / `ocsp_summary.csv` 三张汇总表 + 每证书的联网证据（`crl.pem`、`resp.der`），`--detail` 保留完整 JSON/CSV。
+- 产物：`ca_summary.csv` / `crl_summary.csv` / `ocsp_summary.csv` 三张汇总表 + 每证书的联网证据（`crl.pem`、`resp.der`），`--detail` 保留完整 JSON/CSV；
+- 批量时如遇重名证书文件（不同版本链里的同名 cer 等），自动逐级补父目录前缀（`__` 连接）生成唯一名，子目录名与汇总表 cert 列同用，不会互相覆盖。
 
 ```bash
 python3 run_cert_crl_ocsp.py certs/baidu.pem     # 或传目录批量
@@ -186,7 +187,10 @@ python3 check_certs_python/ct_audit/check_ct_temporal.py certs/ --csv t.csv  # �
 ```bash
 python3 find_cert_root_python/find_cert_root.py certs/baidu.pem --download   # 允许 AIA 联网下载
 python3 find_cert_root_python/find_cert_root.py cert.pem --pool ca_dir --trust cacert.pem
+python3 find_cert_root_python/find_cert_root.py certs/ --download --csv results/cert_roots.csv   # 目录批量
 ```
+
+批量：目录/多文件逐张追链，每张一行结论（根 / 信任锚 / openssl verify / 链长），`--csv` 出汇总表，`--detail` 保留完整追链过程；证书池与信任库只加载一次全部共用。退出码仅在证书加载失败时为 1（链中断 / 根不受信是审计结论，不算失败）。
 
 ## 6. 一键编排 —— `run_all.py` / `run_all.sh`
 

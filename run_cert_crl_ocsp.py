@@ -26,6 +26,9 @@ CRL / OCSP 步骤联网失败（无 CDP / 无 OCSP 地址 / 网络不通 / 下�
         ├── crl.pem           从 CDP 下载的 CRL（PEM，有则）
         └── resp.der          原始 OCSP 响应（有则）
 
+批量时如遇重名证书文件（如不同版本链里的同名 cer），自动逐级补父目录前缀
+（__ 连接）生成唯一名，子目录名与汇总表 cert 列同用，不会互相覆盖。
+
 加 --detail 则保留每张证书的完整产物（同旧版行为）:
     <证书名>/
     ├── cert.json / cert.csv      证书侧（433 行，CA 规则真实执行）
@@ -112,12 +115,46 @@ def fmt_stats(stats):
     return "  ".join(f"{k}={v}" for k, v in stats.items())
 
 
-def run_one(cert_path, out_root=None, timeout=15, detail=False):
+def dedupe_stems(cert_paths):
+    """给每张证书生成唯一的显示名/子目录名（默认= 文件名去扩展名）。
+    重名时逐级补父目录前缀（用 __ 连接）直到唯一，避免同名证书
+    （不同版本链里的同名文件）在输出目录和汇总表 cert 列里混在一起。
+    返回 {路径: 唯一名}，顺序与输入一致。"""
+    names, used = {}, set()
+    for p in cert_paths:
+        stem = os.path.splitext(os.path.basename(p))[0]
+        if stem not in used:
+            names[p] = stem
+            used.add(stem)
+            continue
+        d, prefix = os.path.dirname(p), []
+        while True:                      # 逐级向上补父目录，直到唯一
+            prefix.insert(0, os.path.basename(d))
+            cand = "__".join(prefix + [stem])
+            if cand not in used:
+                names[p] = cand
+                used.add(cand)
+                break
+            parent = os.path.dirname(d)
+            if parent == d:              # 已到根仍冲突（理论不会发生）→ 序号兜底
+                i = 2
+                while f"{stem}_{i}" in used:
+                    i += 1
+                cand = f"{stem}_{i}"
+                names[p] = cand
+                used.add(cand)
+                break
+            d = parent
+    return names
+
+
+def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
     """跑单张证书：证书侧 + CRL 侧 + OCSP 侧，各侧结果合并进输出根下的三张汇总表。
     默认精简模式（只留 *_summary.csv + crl.pem / resp.der 证据文件）；
     detail=True 保留每张证书的全部中间产物（json/csv/pem/der）。
+    stem 为显示名/子目录名（默认取文件名去扩展名；批量时由 dedupe_stems 去重）。
     返回是否全部 OK"""
-    stem = os.path.splitext(os.path.basename(cert_path))[0]
+    stem = stem or os.path.splitext(os.path.basename(cert_path))[0]
     summary_dir = out_root or os.path.join(PROJECT_ROOT, "results")
     out_dir = os.path.join(summary_dir, stem)   # 每证书一个子目录
     os.makedirs(out_dir, exist_ok=True)
@@ -237,10 +274,15 @@ def run_target(target, out_root=None, timeout=15, detail=False):
             err(f"目录下没有找到证书文件（{CERT_EXTS}）-> {target}")
             sys.exit(1)
         print(f"批量模式: 发现 {len(certs)} 个证书")
+        names = dedupe_stems(certs)     # 同名证书 → 父目录前缀区分（子目录与 cert 列同用）
+        dup = {n for p, n in names.items()
+               if n != os.path.splitext(os.path.basename(p))[0]}
+        if dup:
+            print("检测到重名证书，已加父目录前缀区分: " + ", ".join(sorted(dup)))
         ok_all, ok, fail = True, 0, []
         for i, c in enumerate(certs, 1):
             print(f"\n{'='*60}\n[{i}/{len(certs)}] {c}\n{'='*60}")
-            ok_one = run_one(c, summary_dir, timeout, detail)
+            ok_one = run_one(c, summary_dir, timeout, detail, stem=names[c])
             ok_all &= ok_one
             if ok_one:
                 ok += 1

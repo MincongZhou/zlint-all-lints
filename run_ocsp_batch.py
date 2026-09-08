@@ -23,6 +23,7 @@ import argparse
 import csv
 import glob
 import os
+import shlex
 import subprocess
 import sys
 from collections import Counter
@@ -131,13 +132,54 @@ def batch(paths, csv_path=None, timeout=15, der=False, sha256=False):
     return 0 if not failed else 1
 
 
+def _merge_existing(parts):
+    """贪心合并：某段自身不是存在的路径时，尝试与后续段用空格拼接，
+    拼出的完整路径存在则合并（还原被空格拆散的无引号路径）。
+    拼不出来的段保持原样（报"路径不存在"，不吞拼写错误）。"""
+    out, i = [], 0
+    while i < len(parts):
+        cur = parts[i]
+        if os.path.exists(os.path.expanduser(cur)):
+            out.append(cur)
+            i += 1
+            continue
+        merged, j = cur, i + 1
+        while j < len(parts):
+            cand = merged + " " + parts[j]
+            if os.path.exists(os.path.expanduser(cand)):
+                merged, j = cand, j + 1
+            else:
+                break
+        out.append(merged)
+        i = j
+    return out
+
+
+def parse_paths(raw):
+    """解析交互输入的路径串：逗号分隔优先；空格分隔时支持引号包裹含空格的路径
+    （兼容中文引号"" ''）；未加引号的含空格路径若与相邻段拼接后存在也会自动合并。
+    返回去空白的路径列表。"""
+    raw = (raw.replace("\u201c", '"').replace("\u201d", '"')
+              .replace("\u2018", "'").replace("\u2019", "'"))
+    if "," in raw:
+        parts = raw.split(",")
+    else:
+        try:
+            parts = shlex.split(raw)        # 支持 "路径 含 空格" 引号包裹
+        except ValueError:                  # 引号不配对等 → 退回普通空格拆分
+            parts = raw.split()
+    return [p.strip().strip('"').strip("'")
+            for p in _merge_existing([s for s in parts if s.strip()])]
+
+
 def interactive():
-    """无参数时的交互式输入：空格/逗号分隔多个路径"""
-    print("=== 交互模式（输入文件或目录，空格/逗号分隔多个，q 退出）===")
+    """无参数时的交互式输入：逗号分隔多个路径；空格分隔时含空格的路径用引号包裹"""
+    print('=== 交互模式（输入文件或目录，多个用逗号分隔；'
+          '含空格的路径可用引号包裹，q 退出）===')
     raw = input("证书路径或目录: ").strip()
     if raw.lower() in ("q", "quit"):
         sys.exit(0)
-    paths = raw.replace(",", " ").split()
+    paths = parse_paths(raw)
     csv_path = None
     d = input("CSV 输出路径 (回车不输出): ").strip()
     if d.lower() in ("q", "quit"):

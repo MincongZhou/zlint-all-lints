@@ -161,6 +161,8 @@ python3 run_ocsp_batch.py certs/ --timeout 10 --der               # 调超时 / 
 python3 run_ocsp_batch.py                                         # 无参数 → 交互模式
 ```
 
+交互模式多个路径建议用**逗号分隔**；含空格的路径可用引号包裹（不加引号也能识别——按"与相邻段拼接后路径存在"自动合并），兼容中文引号。
+
 **`check_crl.py`**：从证书 CDP（CRL Distribution Points）扩展下载 CRL，DER/PEM 自动识别并统一转成 PEM，供 zlint 跑 18 条 CRL 规则
 
 ```bash
@@ -272,6 +274,7 @@ python3 run_cert_crl_ocsp.py                        # 无参数 → 交互模式
 - CRL 侧：`check_crl.py` 从证书 CDP 下载 CRL 转 PEM → 跑 18 条 CRL 规则
 - OCSP 侧：`check_ocsp.py` 查 OCSP 并存原始 DER 响应 → 跑 1 条 OCSP 规则
 - CRL/OCSP 联网失败（无 CDP/无 OCSP 地址/网络不通）自动跳过该侧，不中断整体
+- 批量时如遇重名证书文件，自动逐级补父目录前缀（`__` 连接）生成唯一名（如 `chain-20260611__CFCA DV OCA`），子目录名与汇总表 cert 列同用，不会互相覆盖
 
 **默认精简模式**：每张证书三侧的结果合并进输出根下的三张汇总表后，中间 JSON/CSV 随跑随删；联网证据 `crl.pem` / `resp.der` 保留在该证书目录。加 `--detail` 则完整保留每张证书的 `cert/crl/ocsp` 的 `.json/.csv`。
 
@@ -357,13 +360,15 @@ python3 check_certs_python/ct_audit/check_ct_temporal.py certs/ --csv t.csv    #
 对任意一张证书沿 issuer 一路追到根证书，并把链顶与信任库（系统 / 指定 bundle）做 SHA-256 指纹比对，判断它是否构成当前环境的"信任锚"——对应审计中"某证书的 root 是谁、是否被信任"这类问题：
 
 ```bash
-python3 find_cert_root_python/find_cert_root.py <证书路径> [选项]
+python3 find_cert_root_python/find_cert_root.py <证书路径|目录> [更多...] [选项]
 python3 find_cert_root_python/find_cert_root.py certs/baidu.pem --download
         # 允许联网：本地找不齐时从 AIA CA-Issuers 自动下载（http 失败兜底 https）
 python3 find_cert_root_python/find_cert_root.py cert.pem --pool <目录|文件>
         # 从本地证书池找上级（可把含中间 CA / 根的目录指进来）
 python3 find_cert_root_python/find_cert_root.py cert.pem --trust cacert.pem
         # 指定信任库 bundle（默认自动找系统信任库）
+python3 find_cert_root_python/find_cert_root.py certs/ --download --csv results/cert_roots.csv
+        # 目录批量：逐张追链，每张一行结论（根/信任锚/openssl/链长），--detail 保留完整过程
 ```
 
 - 追链逻辑：重复"`issuer` DN == 上级 `subject` DN + 验签"直到 `subject == issuer`（自签候选根）；验签支持 RSA PKCS1/PSS、ECDSA、Ed25519/Ed448
