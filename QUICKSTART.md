@@ -311,20 +311,29 @@ python3 check_certs_python/check_crl.py certs/baidu.pem --out crl.pem
 - 自动遍历证书 CDP 里的全部 http(s) 分发点，逐个尝试直到成功
 - 下载内容会校验确实是 CRL（防 HTML 错误页/误传证书）；无参数运行进入交互模式
 
-### 11.7 解析 CRL 吊销序列号（crl_sourcedata.py）
+### 11.7 解析 CRL 吊销序列号（extract_crl_fields.py）
 
 CRL 本身只含吊销条目的**序列号 + 吊销时间 + 原因码**，不含证书本体。解析出序列号清单后，可拿序列号去本地证书池反查"哪张证书被吊销"：
 
 ```bash
-python3 check_certs_python/crl_sourcedata.py crl.pem                  # 逐行输出 0x序列号 + 十进制
-python3 check_certs_python/crl_sourcedata.py crls/ --csv revoked.csv  # 目录批量 + 导出 CSV（含吊销时间/原因）
+python3 extract_CertInfo_python/extract_crl_fields.py crl.pem                  # 逐行输出 0x序列号 + 十进制
+python3 extract_CertInfo_python/extract_crl_fields.py crls/ --csv revoked.csv  # 目录批量 + 导出 CSV（含吊销时间/原因）
+
+# 全字段提取（CRL 版 extract_cert_fields）
+python3 extract_CertInfo_python/extract_crl_fields.py crl.pem --full            # 终端打印全部字段
+python3 extract_CertInfo_python/extract_crl_fields.py crl.pem --json            # JSON
+python3 extract_CertInfo_python/extract_crl_fields.py crls/ --csv wide.csv --csv-mode wide
+    # → wide.csv（每 CRL 一行：头字段 + 扩展列）+ wide_entries.csv（每条吊销记录全字段）
+python3 extract_CertInfo_python/extract_crl_fields.py crl.pem --csv f.csv --csv-mode fields
 ```
+
+`--csv-mode` 四种：`revoked`（默认，精简 5 列）/ `entries`（每条吊销记录全字段）/ `wide`（每 CRL 一行 + 条目副表）/ `fields`（每字段一行，零丢失）；加 `--issuer <证书>` 可用签发者公钥做 `is_signature_valid` 验签。
 
 与 11.6 组合成"下载 + 解析"一条龙：
 
 ```bash
 python3 check_certs_python/check_crl.py certs/baidu.pem --out crl.pem \
-  && python3 check_certs_python/crl_sourcedata.py crl.pem --csv baidu_revoked.csv
+  && python3 extract_CertInfo_python/extract_crl_fields.py crl.pem --csv baidu_revoked.csv
 ```
 
 ### 11.8 一张证书跑齐 CA / CRL / OCSP 三类规则（run_cert_crl_ocsp.py）

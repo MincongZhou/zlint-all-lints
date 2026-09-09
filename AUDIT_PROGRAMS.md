@@ -115,12 +115,17 @@ python3 check_certs_python/check_crl.py certs/baidu.pem --out crl.pem
 ./zlint-all-lints -cert crl.pem
 ```
 
-### 3.3 `crl_sourcedata.py` —— 解析吊销条目
+### 3.3 `extract_crl_fields.py` —— 解析吊销条目
 
 把 CRL 里的吊销条目解析成清单：**序列号（16/10 进制）+ 吊销时间 + 原因码**。CRL 只含序列号不含证书本体，可拿序列号去本地证书池反查"哪张证书被吊销"。支持目录批量 + `--csv` 导出。
 
+另有全字段模式（对齐 `extract_cert_fields.py`）：CRL 级（version/issuer/thisUpdate/nextUpdate/签名算法与签名值/tbsCertList 与全文指纹/全部扩展 `CRLNumber·AKI·IDP·DeltaCRLIndicator·FreshestCRL·AIA·IAN`）+ 条目级（`CRLReason·InvalidityDate·CertificateIssuer`），`--issuer` 可验签。
+
 ```bash
-python3 check_certs_python/crl_sourcedata.py crl.pem --csv revoked.csv
+python3 extract_CertInfo_python/extract_crl_fields.py crl.pem --csv revoked.csv   # 吊销清单（默认）
+python3 extract_CertInfo_python/extract_crl_fields.py crl.pem --full              # 全字段终端输出
+python3 extract_CertInfo_python/extract_crl_fields.py crls/ --csv wide.csv --csv-mode wide
+    # 每 CRL 一行的宽表 + 每张副表 <name>_entries.csv（每条吊销记录全字段）
 ```
 
 ### 3.4 `check_revocation_consistency.py` —— 两源吊销信息交叉核验
@@ -223,7 +228,7 @@ python3 run_all.py certs                  # 目录批量：每张证书一个子
 | 证书的三类规则（CA/CRL/OCSP）全真实跑？ | `run_cert_crl_ocsp.py` | 三张汇总表 + 证据文件 |
 | 证书由谁签发、有效期/指纹/扩展？ | `extract-cert` 等 4 支 | JSON / 终端 |
 | 证书当前吊销状态？ | `check_ocsp.py` / `check_crl.py` | GOOD/REVOKED/UNKNOWN |
-| CRL 里吊销了哪些序列号、何时、何原因？ | `crl_sourcedata.py` | 终端 / CSV |
+| CRL 里吊销了哪些序列号、何时、何原因？ | `extract_crl_fields.py` | 终端 / CSV |
 | CRL 与 OCSP 两源吊销信息是否一致？ | `check_revocation_consistency.py` | 一致/不一致/单源，退出码 1 把关 |
 | 证书有没有 SCT、谁签的？ | `parse_sct.py` | 提取 + log list 匹配 |
 | SCT 是不是日志私钥的真实签名？ | `verify_sct.py` | 验签通过/失败 |

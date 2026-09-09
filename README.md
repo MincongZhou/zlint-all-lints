@@ -174,22 +174,6 @@ python3 check_crl.py                            # 无参数 → 交互模式
 - 自动遍历证书 CDP 里的全部 http(s) 分发点，逐个尝试直到下载成功
 - 下载内容会校验确实是 CRL（防 HTML 错误页/误传证书）
 
-**`crl_sourcedata.py`**：解析 CRL 的吊销条目（序列号 16/10 进制 + 吊销时间 + 原因码），支持单文件或目录批量，可导出 CSV 汇总
-
-```bash
-python3 crl_sourcedata.py <crl 文件|目录> ... [--csv 输出.csv]
-python3 crl_sourcedata.py crl.pem                      # 终端逐行输出序列号
-python3 crl_sourcedata.py crls/ --csv revoked.csv      # 批量导出（含吊销时间/原因）
-```
-
-- CRL 里只有吊销**序列号**（+吊销时间+原因码），不含证书本体；如需"哪张证书被吊销"，拿序列号去本地证书池反查
-- 与 `check_crl.py` 组合，下载 + 解析一条龙：
-
-```bash
-python3 check_crl.py certs/baidu.pem --out crl.pem \
-  && python3 crl_sourcedata.py crl.pem --csv baidu_revoked.csv
-```
-
 **`run_zlint.py`**：`run_batch.sh` 的 Python 封装（支持证书/CRL/OCSP 的**目录或单个文件**），支持交互模式与 `--jsonl` 转换。默认同 `run_batch.sh` 只留汇总表；`--detail` 透传给底层脚本以保留单对象 JSON/CSV，`--jsonl` 需要读 JSON 源文件，会自动保留：
 
 ```bash
@@ -208,6 +192,7 @@ python3 run_zlint.py                            # 无参数 → 交互模式
 | `extract_org.py` | 提取证书**主体（subject）与签发者（issuer）**的组织名（O 字段）及各自 DN | `python3 extract_org.py <证书> [--der]` |
 | `extract_cert_fields.py` | 用 cryptography 解析证书**所有字段**：版本/序列号/签名算法/签发者/有效期/主体逐条属性/公钥参数/签名值/指纹，及**全部扩展**逐项结构化解析（SAN/IAN、KU/EKU、BasicConstraints、SKI/AKI、AIA、CDP、策略与约束、SCT、未知扩展 hex 原文…） | `python3 extract_cert_fields.py <证书> [--der] [--json] [--out 文件]`<br>`--csv 文件`：单证书→字段清单表，目录/多证书→wide 宽表（另出扩展长表） |
 | `openssl_script.py` | 调用 `openssl x509` 提取 subject / issuer / 有效期 | 交互输入证书路径 |
+| `extract_crl_fields.py` | **CRL 版**字段提取：吊销清单（序列号 16/10 进制 + 时间 + 原因码）+ CRL 全字段（头字段 / 全部扩展 / 每条吊销记录），四种 CSV 模式与 `extract_cert_fields.py` 对齐 | `python3 extract_crl_fields.py <crl\|目录> [--csv 文件] [--csv-mode ...] [--full] [--json]` |
 
 > 提示：`extract_sct.py` 需要 `cryptography >= 42.0`（原生支持 CT Precertificate SCTs 扩展解析）。
 
@@ -244,6 +229,30 @@ rows = list(csv.DictReader(open("certs_wide.csv", encoding="utf-8-sig")))
 [x["file"] for x in rows if not x["ext.CRL_DISTRIBUTION_POINTS.present"]]
 # 按字段批量测试：所有 ECDSA 证书
 [x["file"] for x in rows if x["pubkey_type"] == "ECDSA"]
+```
+
+**`extract_crl_fields.py`** —— CRL 版字段提取（与 `extract_cert_fields.py` 同族）：吊销清单 + CRL 全字段
+
+```bash
+python3 extract_CertInfo_python/extract_crl_fields.py <crl 文件|目录> ... [--csv 输出.csv] [--csv-mode revoked|entries|wide|fields]
+python3 extract_CertInfo_python/extract_crl_fields.py crl.pem                      # 终端逐行输出序列号
+python3 extract_CertInfo_python/extract_crl_fields.py crls/ --csv revoked.csv      # 批量导出（含吊销时间/原因）
+python3 extract_CertInfo_python/extract_crl_fields.py crl.pem --full               # 全字段：CRL 头 + 扩展 + 每条吊销记录
+python3 extract_CertInfo_python/extract_crl_fields.py crl.pem --json               # 全字段 JSON
+python3 extract_CertInfo_python/extract_crl_fields.py crls/ --csv wide.csv --csv-mode wide   # 宽表 + 副表 wide_entries.csv
+python3 extract_CertInfo_python/extract_crl_fields.py crl.pem --csv f.csv --csv-mode fields  # 每字段一行（零丢失）
+python3 extract_CertInfo_python/extract_crl_fields.py crl.pem --issuer ca.pem --full         # 顺带用签发者公钥验签
+```
+
+- 覆盖 CRL 级（version / issuer 逐条属性 / thisUpdate / nextUpdate / 签名算法与签名值 / tbsCertList 指纹 / SHA-256+SHA-1 指纹 / 全部扩展 `CRLNumber·AKI·IDP·DeltaCRLIndicator·FreshestCRL·AIA·IAN`）与条目级（`CRLReason·InvalidityDate·CertificateIssuer`）
+- `--csv-mode` 四种：`revoked`（默认，精简 5 列）/ `entries`（每条吊销记录全字段）/ `wide`（每 CRL 一行 + 条目副表）/ `fields`（每字段一行，零丢失）
+- 宽表列数 = 25 个固定列 + 每种扩展 3 列；加 `--no-ext-columns` 只输出固定列，跨批次列数恒定
+- CRL 里只有吊销**序列号**（+吊销时间+原因码），不含证书本体；如需"哪张证书被吊销"，拿序列号去本地证书池反查
+- 与 `check_crl.py` 组合，下载 + 解析一条龙：
+
+```bash
+python3 check_crl.py certs/baidu.pem --out crl.pem \
+  && python3 extract_CertInfo_python/extract_crl_fields.py crl.pem --csv baidu_revoked.csv
 ```
 
 ### run_all.sh / run_all.py —— 一键跑完 4 个分析脚本
