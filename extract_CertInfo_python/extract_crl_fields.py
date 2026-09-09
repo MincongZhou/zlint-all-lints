@@ -32,16 +32,18 @@ extract_crl_fields.py —— CRL 吊销清单 + 全字段提取（对齐 extract
           DeltaCRLIndicator / FreshestCRL / AIA / IAN / 未知扩展 hex 原文）
   条目级: serialNumber(hex+dec) / revocationDate / CRLReason /
           InvalidityDate / CertificateIssuer / 其它条目扩展
-  验签  : --issuer <证书> 时给出 is_signature_valid 结果（CRL 自身不含公钥）
+  验签  : --issuer <证书> 时给出 is_signature_valid 结果（CRL 自身不含公钥），
+          并比对证书 subject 与 CRL issuer 的 DN，不匹配时告警（issuer_dn_match=False）
 
 目录递归查找 .pem/.der/.crl；CSV 统一 UTF-8 with BOM（Excel 双击不乱码）。
-依赖: python3 + cryptography
+依赖: python3 + cryptography >= 42.0（运行时自动检查）
 """
 
 import csv
 import glob
 import json
 import os
+import re
 import sys
 from enum import Enum
 
@@ -49,6 +51,20 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 
 CRL_EXTS = (".pem", ".der", ".crl")
+
+# ---------------------------------------------------------------------------
+# cryptography 版本下限检查
+# （last_update_utc / revocation_date_utc 等 *_utc API 需要 >= 42.0）
+# ---------------------------------------------------------------------------
+_MIN_CRYPTO = (42, 0)
+
+
+def check_cryptography_version():
+    v = __import__("cryptography").__version__
+    nums = tuple(int(n) for n in re.findall(r"\d+", v)[:2] or (0,))
+    if nums < _MIN_CRYPTO:
+        sys.exit(f"错误: 需要 cryptography >= {'.'.join(map(str, _MIN_CRYPTO))}"
+                 f"（当前 {v}），请执行: pip install -U cryptography")
 
 # ---------------------------------------------------------------------------
 # OID → 可读名映射（遍历 cryptography 自带的 OID 常量类）
@@ -328,7 +344,7 @@ def parse_entry(rc):
 # ---------------------------------------------------------------------------
 # 主解析：CRL → 全字段 dict
 # ---------------------------------------------------------------------------
-def parse_crl(crl, path, fmt, issuer_pub=None):
+def parse_crl(crl, path, fmt, issuer_pub=None, issuer_subject=None):
     sig_hash = None
     try:
         if crl.signature_hash_algorithm is not None:
@@ -336,9 +352,12 @@ def parse_crl(crl, path, fmt, issuer_pub=None):
     except Exception:
         sig_hash = None
 
-    # cryptography 未暴露 CRL version；RFC 5280: 有扩展即 v2
+    # cryptography 未暴露 CRL version；RFC 5280 §5.1: 有扩展即 v2
+    # （CRL 级扩展或任一条目级扩展都算；扩展解析失败说明扩展确实存在，仍按 v2）
+    entries = [parse_entry(rc) for rc in crl]
     exts = parse_extensions(crl)
-    version_label = "v2" if exts and "parse_error" not in exts[0] else "v1"
+    has_exts = bool(exts) or any(bool(en["extensions"]) for en in entries)
+    version_label = "v2" if has_exts else "v1"
 
     def fp(alg):
         try:
@@ -346,9 +365,18 @@ def parse_crl(crl, path, fmt, issuer_pub=None):
         except Exception:
             return None
 
-    entries = [parse_entry(rc) for rc in crl]
     sig_valid = None
+    dn_match = None
     if issuer_pub is not None:
+        # 验签前先比对 DN：公钥对但钥匙不是这把时，False 不代表 CRL 被篡改
+        try:
+            dn_match = (crl.issuer.rfc4514_string()
+                        == issuer_subject.rfc4514_string())
+            if not dn_match:
+                print(f"  !! {path}: --issuer 证书 subject 与 CRL issuer DN 不匹配，"
+                      f"验签结果仅供参考", file=sys.stderr)
+        except Exception:
+            dn_match = None
         try:
             sig_valid = bool(crl.is_signature_valid(issuer_pub))
         except Exception as e:
@@ -358,7 +386,8 @@ def parse_crl(crl, path, fmt, issuer_pub=None):
         "file": os.path.basename(path),
         "path": path,
         "format": fmt,
-        "version": {"label": version_label, "note": "推断：有扩展即 v2"},
+        "version": {"label": version_label,
+                    "note": "推断：CRL 级或条目级有扩展即 v2"},
         "issuer": {"rfc4514": crl.issuer.rfc4514_string(),
                    "attributes": name_attrs(crl.issuer)},
         "this_update": _iso(crl.last_update_utc),
@@ -375,12 +404,16 @@ def parse_crl(crl, path, fmt, issuer_pub=None):
         "fingerprints": {"sha256": fp(hashes.SHA256()), "sha1": fp(hashes.SHA1())},
         "revoked_count": len(entries),
         "signature_valid": sig_valid,
+        "issuer_dn_match": dn_match,
         "extensions": exts,
         "entries": entries,
     }
 
 
 def _iso(dt):
+    """datetime → ISO 字符串；None（如缺失的 nextUpdate）保持 None"""
+    if dt is None:
+        return None
     return dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
 
 
@@ -432,7 +465,7 @@ def print_full(parsed, stream=None):
     for a in parsed["issuer"]["attributes"]:
         p(f"    - {a['oid']} [{a['dotted']}]: {a['value']}")
     p(f"thisUpdate: {parsed['this_update']}")
-    p(f"nextUpdate: {parsed['next_update']}")
+    p(f"nextUpdate: {parsed['next_update'] if parsed['next_update'] else '(无)'}")
 
     sa = parsed["signature_algorithm"]
     p(f"签名算法 (signatureAlgorithm): {sa['name']} [{sa['oid']}]"
@@ -449,6 +482,8 @@ def print_full(parsed, stream=None):
         p(f"指纹 SHA-1  : {fpp['sha1']}")
     if parsed["signature_valid"] is not None:
         p(f"验签结果: {parsed['signature_valid']}")
+    if parsed["issuer_dn_match"] is False:
+        p("  !! 签发者证书 subject 与 CRL issuer DN 不匹配，验签结果仅供参考")
 
     p(f"扩展 (extensions): 共 {len(parsed['extensions'])} 个")
     for i, e in enumerate(parsed["extensions"], 1):
@@ -530,6 +565,8 @@ def wide_row(parsed, include_ext=True):
         "sig_hash": parsed["signature_algorithm"]["hash_algorithm"] or "",
         "signature_valid": "" if parsed["signature_valid"] is None
                            else parsed["signature_valid"],
+        "issuer_dn_match": ("" if parsed["issuer_dn_match"] is None
+                            else parsed["issuer_dn_match"]),
         "sha256": parsed["fingerprints"]["sha256"] or "",
         "sha1": parsed["fingerprints"]["sha1"] or "",
         "tbs_sha256": parsed["tbs_certlist"]["sha256"],
@@ -616,7 +653,7 @@ WIDE_BASE_FIELDS = [
     "file", "format", "version", "issuer",
     "issuer_cn", "issuer_o", "issuer_ou", "issuer_c",
     "this_update", "next_update",
-    "sig_alg", "sig_oid", "sig_hash", "signature_valid",
+    "sig_alg", "sig_oid", "sig_hash", "signature_valid", "issuer_dn_match",
     "sha256", "sha1", "tbs_sha256",
     "crl_number", "delta_crl_indicator", "aki_keyid",
     "idp_indirect", "idp_only_ca", "idp_only_user",
@@ -650,19 +687,17 @@ def expand_inputs(paths, exclude=()):
     return sorted({f for f in files if os.path.abspath(f) not in skip})
 
 
-def load_issuer_pub(path):
-    """加载签发者证书公钥（用于 CRL 验签）"""
-    from cryptography.hazmat.primitives.serialization import Encoding
+def load_issuer_cert(path):
+    """加载签发者证书（用于 CRL 验签 + issuer DN 比对）"""
     with open(os.path.expanduser(path), "rb") as f:
         raw = f.read()
     try:
-        cert = x509.load_pem_x509_certificate(raw)
+        return x509.load_pem_x509_certificate(raw)
     except Exception:
-        cert = x509.load_der_x509_certificate(raw)
-    return cert.public_key()
+        return x509.load_der_x509_certificate(raw)
 
 
-def run_batch(paths, csv_file=None, csv_mode="revoked", issuer_pub=None,
+def run_batch(paths, csv_file=None, csv_mode="revoked", issuer_cert=None,
               as_json=False, full=False, no_ext=False):
     """解析并输出。csv_mode: revoked / entries / wide / fields"""
     files = expand_inputs(paths, exclude=[csv_file] if csv_file else [])
@@ -675,11 +710,13 @@ def run_batch(paths, csv_file=None, csv_mode="revoked", issuer_pub=None,
               file=sys.stderr)
         sys.exit(1)
 
+    issuer_pub = issuer_cert.public_key() if issuer_cert is not None else None
+    issuer_subject = issuer_cert.subject if issuer_cert is not None else None
     parsed_list, ok, fail = [], 0, 0
     for fp in files:
         try:
             crl, fmt = load_crl(fp)
-            parsed_list.append(parse_crl(crl, fp, fmt, issuer_pub))
+            parsed_list.append(parse_crl(crl, fp, fmt, issuer_pub, issuer_subject))
             ok += 1
         except Exception as e:
             fail += 1
@@ -711,7 +748,7 @@ def run_batch(paths, csv_file=None, csv_mode="revoked", issuer_pub=None,
             print()
         return
 
-    if csv_mode == "wide":
+    if csv_file and csv_mode == "wide":
         rows = [wide_row(p, include_ext=not no_ext) for p in parsed_list]
         ext_cols = sorted({k for r in rows for k in r if k.startswith("ext.")})
         write_csv(csv_file, rows, WIDE_BASE_FIELDS + ext_cols)
@@ -720,8 +757,9 @@ def run_batch(paths, csv_file=None, csv_mode="revoked", issuer_pub=None,
         write_csv(ent_path, ent, ENTRY_FULL_FIELDS)
         print(f"已写入: {csv_file}（CRL 宽表，{tail}，{len(rows)} 行 × "
               f"{len(WIDE_BASE_FIELDS) + len(ext_cols)} 列）", file=sys.stderr)
-        print(f"已写入: {ent_path}（吊销条目全字段，{len(ent)} 行）", file=sys.stderr)
-    elif csv_mode == "fields":
+        print(f"已写入: {ent_path}（吊销条目全字段，{len(ent)} 行）",
+              file=sys.stderr)
+    elif csv_file and csv_mode == "fields":
         rows = []
         for p in parsed_list:
             for field, value in flatten(p):
@@ -729,7 +767,7 @@ def run_batch(paths, csv_file=None, csv_mode="revoked", issuer_pub=None,
         write_csv(csv_file, rows, ["file", "field", "value"])
         print(f"已写入: {csv_file}（模式 fields，{tail}，共 {len(rows)} 行）",
               file=sys.stderr)
-    else:                       # revoked（默认，兼容旧版） / entries
+    elif csv_file:              # revoked（默认，兼容旧版） / entries
         full_entries = csv_mode == "entries"
         rows = [r for p in parsed_list for r in entry_rows(p, full=full_entries)]
         fields = ENTRY_FULL_FIELDS if full_entries else ENTRY_BRIEF_FIELDS
@@ -742,7 +780,7 @@ def run_batch(paths, csv_file=None, csv_mode="revoked", issuer_pub=None,
         for p in parsed_list:
             print(f"# {p['path']}")
             print(f"# issuer = {p['issuer']['rfc4514']}")
-            print(f"# this_update = {p['this_update']}   next_update = {p['next_update']}")
+            print(f"# this_update = {p['this_update']}   next_update = {p['next_update'] or '(无)'}")
             print(f"# 吊销条目数 = {p['revoked_count']}")
             for en in p["entries"]:
                 print(f"{en['serial_hex']}\t{en['serial_dec']}")
@@ -790,8 +828,8 @@ def interactive():
     if issuer_path.lower() in ("q", "quit"):
         sys.exit(0)
 
-    issuer_pub = load_issuer_pub(issuer_path) if issuer_path else None
-    run_batch([target], csv_file, csv_mode, issuer_pub,
+    issuer_cert = load_issuer_cert(issuer_path) if issuer_path else None
+    run_batch([target], csv_file, csv_mode, issuer_cert,
               as_json=(way == "json"), full=(way == "full"), no_ext=no_ext)
 
 
@@ -806,6 +844,7 @@ def _opt_value(args, flag):
 
 
 def main():
+    check_cryptography_version()
     args = sys.argv[1:]
     if not args:                    # 无参数 → 交互模式
         interactive()
@@ -830,8 +869,8 @@ def main():
         print("错误: --csv 需要输出文件名", file=sys.stderr)
         sys.exit(1)
 
-    issuer_pub = load_issuer_pub(issuer_path) if issuer_path else None
-    run_batch(paths, csv_file, csv_mode, issuer_pub, as_json, full, no_ext)
+    issuer_cert = load_issuer_cert(issuer_path) if issuer_path else None
+    run_batch(paths, csv_file, csv_mode, issuer_cert, as_json, full, no_ext)
 
 
 # 模块级执行：import 后直接调用 parse_crl() 也能得到可读 OID 名

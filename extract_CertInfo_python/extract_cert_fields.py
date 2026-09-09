@@ -15,7 +15,7 @@ extract_cert_fields.py —— 用 cryptography 解析 X.509 证书的所有字�
       未知扩展以 hex 原文展示等）
   5. 指纹: SHA-256（另有 SHA-1，供对照）
 
-依赖: cryptography（pip install cryptography）；SCT 解析需 >= 42.0。
+依赖: cryptography >= 42.0（运行时自动检查；pip install -U cryptography）。
 
 用法:
     python3 extract_cert_fields.py <证书路径> [--der] [--json] [--out 输出文件]
@@ -53,6 +53,7 @@ import datetime
 import io
 import json
 import os
+import re
 import sys
 import uuid
 from enum import Enum
@@ -66,6 +67,20 @@ from cryptography.hazmat.primitives.asymmetric import (
     ed25519,
     rsa,
 )
+
+# ---------------------------------------------------------------------------
+# cryptography 版本下限检查
+# （not_valid_before_utc / SCT 解析等需要 >= 42.0）
+# ---------------------------------------------------------------------------
+_MIN_CRYPTO = (42, 0)
+
+
+def check_cryptography_version():
+    v = __import__("cryptography").__version__
+    nums = tuple(int(n) for n in re.findall(r"\d+", v)[:2] or (0,))
+    if nums < _MIN_CRYPTO:
+        sys.exit(f"错误: 需要 cryptography >= {'.'.join(map(str, _MIN_CRYPTO))}"
+                 f"（当前 {v}），请执行: pip install -U cryptography")
 
 # ---------------------------------------------------------------------------
 # OID → 可读名映射（遍历 cryptography 自带的 OID 常量类）
@@ -225,7 +240,6 @@ def _fmt_distribution_point(v):
                           if v.relative_name else None),
         "reasons": fmt_reasons(v.reasons),
         "crl_issuer": gn_list(v.crl_issuer),
-        "only_has_same_issuer": getattr(v, "only_has_same_issuer", None),
     }
 
 
@@ -1069,6 +1083,7 @@ def interactive():
 
 
 def main():
+    check_cryptography_version()
     args = sys.argv[1:]
 
     if not args:                    # 没有任何参数 → 交互模式
