@@ -8,7 +8,7 @@
 4. **一张证书跑齐 CA / CRL / OCSP 三类规则** —— `run_cert_crl_ocsp.py`（联网）
 
 > 四件事互不依赖，可只做其中一件。任务 1、2 不依赖 zlint；任务 4 需要先编译 `zlint-all-lints`。
-> 其它文档：`README.md`（全貌）、`QUICKSTART.md`（快速上手）、`AUDIT_PROGRAMS.md`（审计视角）。
+> 全貌与依赖说明见 `README.md`；CFCA 整链批量查询见 `query_cfca_certs.sh` / `query_cfca_certs_raw_ocsp.sh`。
 
 ---
 
@@ -69,11 +69,11 @@ go build -o extract-cert ./cmd/extract-cert
 
 ## 2. 准备样本
 
-| 用途 | 需要什么 | 仓库内现成样本 |
+| 用途 | 需要什么 | 样本从哪来 |
 |---|---|---|
-| 证书字段提取 / 任务 4 | 证书 PEM 或 DER | `certs/`（11 张站点证书） |
-| CRL 字段提取 | CRL PEM 或 DER | `results/*/crl.pem`；自备 `.crl` |
-| 批量 OCSP 状态 | 证书（**须含 AIA / OCSP 地址**） | `certs/*.pem` |
+| 证书字段提取 / 任务 4 | 证书 PEM 或 DER | 自备（把证书放到 `certs/` 即可，该目录不入库） |
+| CRL 字段提取 | CRL PEM 或 DER | 自备 `.crl`，或用 `check_crl.py` 从证书 CDP 下载 |
+| 批量 OCSP 状态 | 证书（**须含 AIA / OCSP 地址**） | 自备 |
 
 - 目录输入会**递归**扫描；扩展名范围：证书 `.pem/.crt/.cer/.der`，CRL 另加 `.crl`
 - 不支持 P12/PFX
@@ -253,6 +253,8 @@ CSV 均为 **UTF-8 with BOM**，Excel / WPS 双击即可正常显示中文。
 | 提取脚本跑完没生成文件 | 默认只在终端输出，需显式加 `--csv` / `--out` |
 | 目录里混入 CRL / OCSP 导致证书解析报错 | `extract_cert_fields.py` 会自动跳过并告警；也可只传证书文件 |
 | 结果会不会被提交进 git | 不会，`/results*/`、根目录 `*.csv`、`/certs/`、编译产物等均在 `.gitignore` 中 |
+| OCSP 查到 `GOOD` 能否直接当审计证据 | `check_ocsp.py` / `run_ocsp_batch.py` **不做响应签名验证**，仅供参考；取证请用 `openssl ocsp`（带 `-issuer` 与 `-CAfile`）并确认输出里有 `Response verify OK` |
+| 批量 OCSP 里 `UNKNOWN` / `ERROR` 怎么算 | 都不等于 `GOOD`。OCSP 是 soft-fail 语义，查不到只能是"未知"，不能兜底成"未吊销" |
 
 ---
 
@@ -269,4 +271,8 @@ CSV 均为 **UTF-8 with BOM**，Excel / WPS 双击即可正常显示中文。
 | CRL 验签 | `python3 extract_CertInfo_python/extract_crl_fields.py <crl> --issuer ca.pem` |
 | 批量 OCSP 状态 | `python3 run_ocsp_batch.py <目录> --csv out.csv --timeout 10` |
 | 三类规则一起跑 | `python3 run_cert_crl_ocsp.py <证书\|目录> <输出目录> [--detail]` |
-| 全规则批量 lint | `./run_batch.sh <对象目录> <输出目录> [--detail]` |
+| 单张 OCSP 查询 | `python3 check_certs_python/check_ocsp.py <证书> [签发者证书] --status` |
+| 单张 CRL 下载 | `python3 check_certs_python/check_crl.py <证书> --out crl.pem` |
+| CRL / OCSP 一致性核验 | `python3 check_certs_python/check_revocation_consistency.py <证书\|目录> [--csv 结果.csv]` |
+| CFCA 批量：证书信息 + OCSP 状态 | `./query_cfca_certs.sh <目录> [输出.txt]` |
+| CFCA 批量：证书信息 + OCSP 原文 | `./query_cfca_certs_raw_ocsp.sh <目录> [输出.txt] [--respout 目录]` |
