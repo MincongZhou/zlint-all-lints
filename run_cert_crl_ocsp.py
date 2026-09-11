@@ -2,13 +2,13 @@
 """
 run_cert_crl_ocsp.py —— 对一张证书一键跑齐 zlint 的 CA / CRL / OCSP 三类规则
 
-背景: zlint 对单个输入对象只真实执行其所属类型的规则（证书→CA 414 条，
-CRL→18 条，OCSP→1 条），其余标 NA。本脚本把证书的"配套吊销对象"也取下来一起跑，
+背景: zlint 对单个输入对象只真实执行其所属类型的规则（证书→CA 类，CRL→CRL 类，
+OCSP→OCSP 类），其余标 NA。本脚本把证书的"配套吊销对象"也取下来一起跑，
 让三类规则全部真实执行:
 
-    1. 证书侧:  zlint-all-lints -cert <证书>           → cert.json / cert.csv（CA 414 条）
-    2. CRL 侧:  check_crl.py 从证书 CDP 下载 CRL 转 PEM → zlint-all-lints 跑 CRL 规则（18 条）
-    3. OCSP 侧: check_ocsp.py 查 OCSP 并存原始 DER 响应 → zlint-all-lints 跑 OCSP 规则（1 条）
+    1. 证书侧:  zlint-all-lints -cert <证书>           → cert.json / cert.csv（全部 CA 类规则）
+    2. CRL 侧:  check_crl.py 从证书 CDP 下载 CRL 转 PEM → zlint-all-lints 跑全部 CRL 类规则
+    3. OCSP 侧: check_ocsp.py 查 OCSP 并存原始 DER 响应 → zlint-all-lints 跑全部 OCSP 类规则
 
 CRL / OCSP 步骤联网失败（无 CDP / 无 OCSP 地址 / 网络不通 / 下载超时）时自动跳过，
 只影响对应侧规则，不中断整体。
@@ -31,11 +31,11 @@ CRL / OCSP 步骤联网失败（无 CDP / 无 OCSP 地址 / 网络不通 / 下�
 
 加 --detail 则保留每张证书的完整产物（同旧版行为）:
     <证书名>/
-    ├── cert.json / cert.csv      证书侧（433 行，CA 规则真实执行）
+    ├── cert.json / cert.csv      证书侧（行数 = meta.total_lints，CA 规则真实执行）
     ├── crl.pem                   从 CDP 下载的 CRL（PEM，有则）
-    ├── crl.json / crl.csv        18 条 CRL 规则（有则）
+    ├── crl.json / crl.csv        全部 CRL 类规则（有则）
     ├── resp.der                  原始 OCSP 响应（有则）
-    └── ocsp.json / ocsp.csv      1 条 OCSP 规则（有则）
+    └── ocsp.json / ocsp.csv      全部 OCSP 类规则（有则）
 
 依赖: python3 + cryptography；zlint-all-lints 需已编译（go build -o zlint-all-lints .）。
 """
@@ -170,7 +170,7 @@ def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
             print(f"  → {_SUMMARY_FILE[tag]} 追加 {n} 行")
 
     # ---------- [1/3] 证书侧 ----------
-    print(f"\n===== [1/3] 证书侧 lint（CA 414 条规则） =====")
+    print(f"\n===== [1/3] 证书侧 lint（全部 CA 类规则） =====")
     rc, itype = lint_one(cert_path,
                          os.path.join(out_dir, "cert.json"),
                          os.path.join(out_dir, "cert.csv"))
@@ -178,8 +178,8 @@ def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
     ok_all &= rc == 0
     append_summary("证书侧", "cert.csv")
 
-    # ---------- [2/3] CRL 侧：从 CDP 下载 CRL → 跑 18 条 CRL 规则 ----------
-    print(f"\n===== [2/3] CRL 侧（从 CDP 下载 CRL → 18 条规则，联网） =====")
+    # ---------- [2/3] CRL 侧：从 CDP 下载 CRL → 跑全部 CRL 类规则 ----------
+    print(f"\n===== [2/3] CRL 侧（从 CDP 下载 CRL → 全部 CRL 类规则，联网） =====")
     crl_pem = os.path.join(out_dir, "crl.pem")
     rc = subprocess.call([sys.executable, CHECK_CRL, cert_path,
                           "--out", crl_pem, "--timeout", str(timeout)])
@@ -194,8 +194,8 @@ def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
         print("CRL 下载/转换失败，跳过 CRL 规则（不影响其他步骤）")
         rows.append(("CRL 侧", "跳过", rc))
 
-    # ---------- [3/3] OCSP 侧：查询并保存原始响应 → 跑 1 条 OCSP 规则 ----------
-    print(f"\n===== [3/3] OCSP 侧（查 OCSP 并存原始响应 → 1 条规则，联网） =====")
+    # ---------- [3/3] OCSP 侧：查询并保存原始响应 → 跑全部 OCSP 类规则 ----------
+    print(f"\n===== [3/3] OCSP 侧（查 OCSP 并存原始响应 → 全部 OCSP 类规则，联网） =====")
     resp_der = os.path.join(out_dir, "resp.der")
     rc = subprocess.call([sys.executable, CHECK_OCSP, cert_path,
                           "--respout", resp_der, "--status",

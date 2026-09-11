@@ -31,3 +31,9 @@ __pycache__/
 /all_extensions.csv
 /*_fields.csv
 /oscp_all.csv
+
+# CFCA 批量查询脚本输出（query_cfca_certs*.sh -> cfca_cert_info*.txt）
+/cfca_cert_info*.txt
+
+# 临时调试脚本
+/temp.sh

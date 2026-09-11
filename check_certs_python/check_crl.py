@@ -2,7 +2,7 @@
 """
 check_crl.py —— 从证书 CDP 扩展下载 CRL 并转成 PEM，供 zlint 跑 CRL 规则
 
-zlint 对 CRL 输入会执行 18 条 CRL 规则；本脚本负责"下载 + 格式转换"，产物直接可喂:
+zlint 对 CRL 输入会执行全部 CRL 类规则；本脚本负责"下载 + 格式转换"，产物直接可喂:
 
     zlint -longSummary crl.pem           # 官方 zlint CLI
     ./zlint-all-lints -cert crl.pem      # 本项目的 Go 工具（自动识别输入类型）

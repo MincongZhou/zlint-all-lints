@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run_zlint.py —— 跑 zlint 全部 433 条规则（封装 run_batch.sh）
+run_zlint.py —— 跑 zlint 全部规则（封装 run_batch.sh；规则数随 zlint 版本变化，见 meta.total_lints）
 
 输入支持:
     - 目录：遍历其中所有证书 / CRL / OCSP 响应

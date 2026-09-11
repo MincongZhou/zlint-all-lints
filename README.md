@@ -1,8 +1,12 @@
 # zlint-all-lints
 
-对输入的 PKI 对象（**证书 / CRL / OCSP 响应**）运行 zlint **全部 433 条规则**，输出带 `type` 字段的 JSON，区分每条规则的归属：**CA**（证书）、**CRL**（吊销列表）、**OCSP**（OCSP 响应）。
+对输入的 PKI 对象（**证书 / CRL / OCSP 响应**）运行 zlint **全部规则**，输出带 `type` 字段的 JSON，区分每条规则的归属：**CA**（证书）、**CRL**（吊销列表）、**OCSP**（OCSP 响应）。
 
-Run all 433 zlint rules against a PKI object (certificate / CRL / OCSP response) and export JSON with a `type` field that classifies every rule as **CA**, **CRL**, or **OCSP**.
+Run **all** zlint rules against a PKI object (certificate / CRL / OCSP response) and export JSON with a `type` field that classifies every rule as **CA**, **CRL**, or **OCSP**.
+
+> 规则总数随本地 zlint 源码版本变化，不在文档中写死：以任一输出 JSON 的 `meta.total_lints` 为准（`./build.sh` 编译完会直接打印）。
+
+> 常用任务的完整操作步骤（证书/CRL 字段提取、批量查 OCSP、三类规则一起跑）见 **[RUNBOOK.md](RUNBOOK.md)**。
 
 ## 输入类型 / Input types
 
@@ -10,27 +14,38 @@ Run all 433 zlint rules against a PKI object (certificate / CRL / OCSP response)
 
 | 输入对象 | 真实执行的规则 | 标 `NA` 的规则 |
 |----------|----------------|----------------|
-| 证书 `cert` | 414 条 CA 规则 | 18 条 CRL + 1 条 OCSP |
-| CRL `crl`   | 18 条 CRL 规则 | 414 条 CA + 1 条 OCSP |
-| OCSP `ocsp` | 1 条 OCSP 规则 | 414 条 CA + 18 条 CRL |
+| 证书 `cert` | 全部 CA 规则 | 全部 CRL + OCSP 规则 |
+| CRL `crl`   | 全部 CRL 规则 | 全部 CA + OCSP 规则 |
+| OCSP `ocsp` | 全部 OCSP 规则 | 全部 CA + CRL 规则 |
 
 自动识别偶尔会误判时，可用 `-type cert|crl|ocsp` 强制指定。
 
 ## 规则分布 / Rule counts
 
-| type | 数量 | 说明 |
-|------|------|------|
-| CA   | 414  | 证书类规则 |
-| CRL  | 18   | 吊销列表类规则 |
-| OCSP | 1    | OCSP 响应类规则 |
+各类型规则数量随 zlint 版本变化，以输出 JSON 的 `meta.type_counts` 为准：
+
+| type | 说明 |
+|------|------|
+| CA   | 证书类规则 |
+| CRL  | 吊销列表类规则 |
+| OCSP | OCSP 响应类规则 |
 
 `go.mod` 通过 `replace` 指令复用本地 zlint v3 源码（`../zlint/v3`），无需联网拉取依赖。
 
 ## 构建 / Build
 
 ```bash
-go build -o zlint-all-lints .
+./build.sh                                  # 推荐：go mod tidy + 编译两个工具 + 打印当前规则数
 ```
+
+或手动编译：
+
+```bash
+go build -o zlint-all-lints .
+go build -o extract-cert ./cmd/extract-cert
+```
+
+上游 zlint 更新后（`cd ../zlint && git pull`）重跑 `./build.sh` 即可，依赖会由 `go mod tidy` 同步，规则数变化会直接打印。
 
 ## 使用 / Usage
 
@@ -48,14 +63,14 @@ go build -o zlint-all-lints .
 
 ## 输出示例 / Output sample
 
-```json
+```jsonc
 {
   "meta": {
     "input_file": "crl.pem",
-    "input_type": "crl",
+    "input_type": "crl",                      // cert / crl / ocsp
     "subject": "CN=Test CRL",
-    "total_lints": 433,
-    "type_counts": { "CA": 414, "CRL": 18, "OCSP": 1 }
+    "total_lints": 433,                       // 规则总数：随 zlint 版本变化
+    "type_counts": { "CA": 414, "CRL": 18, "OCSP": 1 }   // 示例值，实际以运行为准
   },
   "lints": [
     {
@@ -109,9 +124,9 @@ results/
 
 ```text
 results/
-├── baidu.pem → baidu.csv               # 单对象 CSV（433 行）
+├── baidu.pem → baidu.csv               # 单对象 CSV（行数 = meta.total_lints）
 ├── baidu.pem → baidu.json              # 单对象 JSON
-├── crl.pem   → crl.csv                 # CRL 输入同样输出 433 行
+├── crl.pem   → crl.csv                 # CRL 输入行数相同（任何输入下恒为全部规则数）
 └── results_summary.csv                 # 汇总：全部对象 × 全部规则，首列 cert 为文件名
 ```
 
@@ -163,7 +178,7 @@ python3 run_ocsp_batch.py                                         # 无参数 �
 
 交互模式多个路径建议用**逗号分隔**；含空格的路径可用引号包裹（不加引号也能识别——按"与相邻段拼接后路径存在"自动合并），兼容中文引号。
 
-**`check_crl.py`**：从证书 CDP（CRL Distribution Points）扩展下载 CRL，DER/PEM 自动识别并统一转成 PEM，供 zlint 跑 18 条 CRL 规则
+**`check_crl.py`**：从证书 CDP（CRL Distribution Points）扩展下载 CRL，DER/PEM 自动识别并统一转成 PEM，供 zlint 跑全部 CRL 类规则
 
 ```bash
 python3 check_crl.py <证书路径> [--timeout 秒] [--out 输出.pem]
@@ -272,16 +287,16 @@ python3 run_all.py                     # 无参数 → 交互模式
 
 ### run_cert_crl_ocsp.py —— 对一张证书跑齐 CA / CRL / OCSP 三类规则
 
-zlint 对单个输入对象只真实执行其所属类型的规则（证书→CA 414 条、CRL→18 条、OCSP→1 条），其余标 `NA`。本脚本把证书的**配套吊销对象**也取下来一起跑，三类规则全部真实执行：
+zlint 对单个输入对象只真实执行其所属类型的规则（证书→CA 类、CRL→CRL 类、OCSP→OCSP 类，各类数量见 `meta.type_counts`），其余标 `NA`。本脚本把证书的**配套吊销对象**也取下来一起跑，三类规则全部真实执行：
 
 ```bash
 python3 run_cert_crl_ocsp.py <证书路径|证书目录> [输出目录] [--timeout 秒] [--detail]
 python3 run_cert_crl_ocsp.py                        # 无参数 → 交互模式
 ```
 
-- 证书侧：`zlint-all-lints -cert <证书>`（CA 414 条）
-- CRL 侧：`check_crl.py` 从证书 CDP 下载 CRL 转 PEM → 跑 18 条 CRL 规则
-- OCSP 侧：`check_ocsp.py` 查 OCSP 并存原始 DER 响应 → 跑 1 条 OCSP 规则
+- 证书侧：`zlint-all-lints -cert <证书>`（全部 CA 类规则）
+- CRL 侧：`check_crl.py` 从证书 CDP 下载 CRL 转 PEM → 跑全部 CRL 类规则
+- OCSP 侧：`check_ocsp.py` 查 OCSP 并存原始 DER 响应 → 跑全部 OCSP 类规则
 - CRL/OCSP 联网失败（无 CDP/无 OCSP 地址/网络不通）自动跳过该侧，不中断整体
 - 批量时如遇重名证书文件，自动逐级补父目录前缀（`__` 连接）生成唯一名（如 `chain-20260611__CFCA DV OCA`），子目录名与汇总表 cert 列同用，不会互相覆盖
 
@@ -305,7 +320,7 @@ results/                    # 默认：只留三张汇总表 + 每证书的证�
 results/
 └── baidu/
     ├── baidu_report.xlsx      # 5 个 sheet：zlint / 组织名 / SCT时间 / OCSP查询 / 汇总
-    ├── baidu.csv              # zlint 全规则 CSV（433 行）
+    ├── baidu.csv              # zlint 全规则 CSV（行数 = meta.total_lints）
     ├── baidu.json / .jsonl    # zlint 全规则 JSON / JSONL
     └── results_summary.csv    # run_batch.sh 的汇总 CSV
 ```

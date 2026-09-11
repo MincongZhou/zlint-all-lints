@@ -3,7 +3,7 @@
 run_all.py —— 对单个证书依次跑完项目里的 4 个分析脚本，并把全部结果写入一个 xlsx 大表
 
 执行的脚本与结果去向:
-    1. run_zlint.py   (check_certs_python/)         zlint 全部 433 条规则 → 读取其输出的 CSV 写入 sheet「zlint」
+    1. run_zlint.py   (check_certs_python/)         zlint 全部规则（数量见 meta.total_lints）→ 读取其输出的 CSV 写入 sheet「zlint」
     2. extract_org.py (extract_CertInfo_python/)    组织名（type=组织名）  → sheet「组织名」
     3. extract_sct.py (extract_CertInfo_python/)    SCT 时间（type=SCT时间）→ sheet「SCT时间」
     4. check_ocsp.py  (check_certs_python/)         OCSP 查询（type=OCSP查询）→ sheet「OCSP查询」

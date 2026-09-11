@@ -2,7 +2,7 @@
 #
 # run_all.sh —— 对单个证书依次跑完项目里的 4 个分析脚本
 #
-#   1. run_zlint.py   (check_certs_python/)        zlint 全部 433 条规则 → JSON/CSV/JSONL
+#   1. run_zlint.py   (check_certs_python/)        zlint 全部规则 → JSON/CSV/JSONL（规则数见 meta.total_lints）
 #   2. extract_org.py (extract_CertInfo_python/)   提取组织名 O 字段
 #   3. extract_sct.py (extract_CertInfo_python/)   提取 SCT 时间戳
 #   4. check_ocsp.py  (check_certs_python/)        OCSP 状态查询（联网）

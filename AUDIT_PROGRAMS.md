@@ -13,7 +13,7 @@ zlint 全规则  →   CT / SCT 审计  →    CRL × OCSP    →    沿 issuer 
                   + 收据是否真实)      两源是否一致)        是否被信任)
 ```
 
-- **静态合规**：证书 / CRL / OCSP 响应本身的格式与策略是否合规 —— zlint **433 条规则**；
+- **静态合规**：证书 / CRL / OCSP 响应本身的格式与策略是否合规 —— zlint **全部规则**（数量随 zlint 版本变化，见输出 `meta.total_lints`）；
 - **公开登记**：CA 是否真的把证书提交到了公开 CT 日志、SCT 收据是否为日志私钥的真实签名 —— CT 三层审计 + 时间交叉核验；
 - **吊销**：这张证书当下是否已被吊销 —— CRL / OCSP 在线查询，以及两源**交叉核验**（语义层，格式规则发现不了）；
 - **信任链**：它由哪家根签发、能否构成当前环境的信任锚 —— 证书链分析。
@@ -22,13 +22,15 @@ zlint 全规则  →   CT / SCT 审计  →    CRL × OCSP    →    沿 issuer 
 
 ### 1.1 `zlint-all-lints`（Go，根目录）—— 核心审计引擎
 
-对任意 PKI 对象跑 zlint **全部 433 条规则**，输出每条规则的判定结果。
+对任意 PKI 对象跑 zlint **全部规则**，输出每条规则的判定结果。
 
 | 输入对象 | 真实执行的规则 | 其余标 `NA` |
 |---|---|---|
-| 证书 `cert` | 414 条 CA 规则（RFC 5280 / CABF BR / EV / SMIME / Mozilla 等） | 18 CRL + 1 OCSP |
-| CRL `crl` | 18 条 CRL 规则 | 414 CA + 1 OCSP |
-| OCSP 响应 `ocsp` | 1 条 OCSP 规则 | 414 CA + 18 CRL |
+| 证书 `cert` | 全部 CA 类规则（RFC 5280 / CABF BR / EV / SMIME / Mozilla 等） | CRL + OCSP 类 |
+| CRL `crl` | 全部 CRL 类规则 | CA + OCSP 类 |
+| OCSP 响应 `ocsp` | 全部 OCSP 类规则 | CA + CRL 类 |
+
+各类规则数量随 zlint 版本变化，运行时见输出 JSON 的 `meta.type_counts`。
 
 **审计点**：每张证书/每份 CRL/每个 OCSP 响应，逐条对照 CA/Browser Forum、RFC 5280 等标准条文（规则自带的 `citation` 字段直接指到条款，如 `BRs: 7.2.2`）。
 
@@ -42,10 +44,10 @@ zlint 全规则  →   CT / SCT 审计  →    CRL × OCSP    →    沿 issuer 
 
 ### 1.2 批量跑 —— `run_batch.sh` / `run_zlint.py`
 
-对目录下**所有对象**（证书 + CRL + OCSP 混排）逐个跑 433 条规则，合并成一张"全部对象 × 全部规则"汇总表：
+对目录下**所有对象**（证书 + CRL + OCSP 混排）逐个跑全部规则，合并成一张"全部对象 × 全部规则"汇总表：
 
 ```text
-results/results_summary.csv     # 首列 cert = 文件名，末行列数自动校验 = 对象数 × 433
+results/results_summary.csv     # 首列 cert = 文件名，末行列数自动校验 = 对象数 × 规则总数
 ```
 
 ```bash
@@ -55,7 +57,7 @@ python3 run_zlint.py certs --detail     # Python 封装：支持单文件/目录
 
 ### 1.3 一张证书跑齐三类规则 —— `run_cert_crl_ocsp.py`
 
-zlint 对单个输入只真实执行其所属类型的规则，其余标 `NA`。本程序把证书的**配套吊销对象也取下来**（CRL 从 CDP 下载、OCSP 从 AIA 查询并存原始响应），于是 **CA 414 + CRL 18 + OCSP 1 全部真实执行**：
+zlint 对单个输入只真实执行其所属类型的规则，其余标 `NA`。本程序把证书的**配套吊销对象也取下来**（CRL 从 CDP 下载、OCSP 从 AIA 查询并存原始响应），于是 **CA / CRL / OCSP 三类规则全部真实执行**：
 
 - 证书侧：`zlint-all-lints`；CRL 侧：`check_crl.py` 下载转 PEM 后跑；OCSP 侧：`check_ocsp.py` 查询存 DER 后跑；
 - 任一联网侧失败（无 CDP/无 OCSP/网络不通）自动跳过，不中断整体；
@@ -98,7 +100,7 @@ st=$(python3 check_ocsp.py cert.pem --status 2>/dev/null) && echo "$st"
 
 CertID 摘要默认 **SHA-1**（同 `openssl ocsp`）。此前用 SHA-256 会让 DigiCert / 微软等 responder 回 `MALFORMED_REQUEST` / `UNAUTHORIZED`——实测 openssl 与 SHA-1 请求均正常（GOOD）；个别仅支持 SHA-256 的 responder 用 `--sha256`。
 
-`--respout <文件>` 把 responder 返回的**原始 OCSP 响应 (DER)** 存下来，可再喂 `zlint-all-lints` 跑那 1 条 OCSP 规则。
+`--respout <文件>` 把 responder 返回的**原始 OCSP 响应 (DER)** 存下来，可再喂 `zlint-all-lints` 跑全部 OCSP 类规则。
 
 批量查询用根目录的 `run_ocsp_batch.py`（`check_ocsp.py` 的封装）：目录递归收集证书逐张查状态、失败不中断，可 `--csv` 输出 `cert/status/detail` 汇总表，供 Excel/二次比对：
 
@@ -108,7 +110,7 @@ python3 run_ocsp_batch.py certs/ --csv results/ocsp_batch.csv
 
 ### 3.2 `check_crl.py` —— CDP 下载 CRL
 
-从证书 CDP（CRL Distribution Points）扩展下载 CRL，DER/PEM 自动识别并统一转成 PEM（校验下载内容确实是 CRL，防 HTML 错误页/误传证书）。拿到的 `crl.pem` 直接喂 `zlint-all-lints` 跑 18 条 CRL 规则。
+从证书 CDP（CRL Distribution Points）扩展下载 CRL，DER/PEM 自动识别并统一转成 PEM（校验下载内容确实是 CRL，防 HTML 错误页/误传证书）。拿到的 `crl.pem` 直接喂 `zlint-all-lints` 跑全部 CRL 类规则。
 
 ```bash
 python3 check_certs_python/check_crl.py certs/baidu.pem --out crl.pem
@@ -223,7 +225,7 @@ python3 run_all.py certs                  # 目录批量：每张证书一个子
 
 | 审计问题 | 用哪个程序 | 判定/输出 |
 |---|---|---|
-| 证书/CRL/OCSP 格式与策略是否合规？ | `zlint-all-lints` | 433 条规则 status + 条款引用 |
+| 证书/CRL/OCSP 格式与策略是否合规？ | `zlint-all-lints` | 全部规则 status + 条款引用 |
 | 一批对象里谁不合规？ | `run_batch.sh` / `run_zlint.py` | `results_summary.csv`（对象 × 规则） |
 | 证书的三类规则（CA/CRL/OCSP）全真实跑？ | `run_cert_crl_ocsp.py` | 三张汇总表 + 证据文件 |
 | 证书由谁签发、有效期/指纹/扩展？ | `extract-cert` 等 4 支 | JSON / 终端 |

@@ -7,7 +7,8 @@
 #   - 加 --detail 才保留每个对象的 <name>.json / <name>.csv
 #
 # zlint-all-lints 会按官方 CLI 的顺序自动识别输入对象类型（证书 → CRL → OCSP），
-# 对哪类对象就真实执行哪类规则，其余两类规则标 NA，输出总条数为全部 433 条。
+# 对哪类对象就真实执行哪类规则，其余两类规则标 NA；规则总数随 zlint 版本变化，
+# 运行时从输出 JSON 的 meta.total_lints 读取，本脚本不写死数量。
 #
 # 用法: ./run_batch.sh <对象目录> [输出目录] [--detail]
 #   对象目录: 直接放 *.pem / *.crt / *.cer / *.der / *.crl 的目录
@@ -48,6 +49,7 @@ echo "cert,name,type,description,citation,source,status,details" > "$summary"
 
 total=0
 failed=0
+rule_count=0    # 从首份成功对象的 JSON 里读取 meta.total_lints（随 zlint 版本变化）
 for cert in "${certs[@]}"; do
     base="$(basename "$cert")"
     stem="${base%.*}"
@@ -59,6 +61,12 @@ for cert in "${certs[@]}"; do
         rm -f "$OUT_DIR/$stem.json" "$OUT_DIR/$stem.csv"   # 失败不留半成品
         failed=$((failed + 1))
         continue
+    fi
+
+    # 规则总数：取首份 JSON 的 meta.total_lints（-pretty=false 为单行 JSON，纯文本提取，不依赖 python3）
+    if (( rule_count == 0 )); then
+        rule_count="$(sed -n 's/.*"total_lints":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$OUT_DIR/$stem.json" | head -1)"
+        rule_count="${rule_count:-0}"
     fi
 
     # 汇总: 去掉每份 CSV 的表头, 在行首补文件名
@@ -79,6 +87,11 @@ else
     echo "单对象 JSON/CSV: 已随跑随删（默认只留汇总表；如需保留加 --detail）"
 fi
 echo "汇总 CSV:  $summary (数据行 $rows)"
-if (( rows != total * 433 )); then
-    echo "注意: 数据行数 $rows 不等于 $total * 433, 可能有对象处理失败或缺规则" >&2
+if (( rule_count > 0 )); then
+    if (( rows != total * rule_count )); then
+        echo "注意: 数据行数 $rows 不等于 $total * $rule_count (规则总数取自 meta.total_lints)," >&2
+        echo "      可能有对象处理失败或缺规则" >&2
+    fi
+else
+    echo "提示: 未能从输出中读取规则总数 (meta.total_lints), 跳过行数校验" >&2
 fi
