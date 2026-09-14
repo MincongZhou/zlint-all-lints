@@ -37,3 +37,7 @@ __pycache__/
 
 # 临时调试脚本
 /temp.sh
+
+# CT 枚举结果（可能含客户证书清单，勿提交）
+cfca_ct_*.json
+cfca_ct_*.csv
