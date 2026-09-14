@@ -15,11 +15,13 @@
     --jsonl    国密子集 JSONL（与输入同构，保留 idx，可直接喂 csv_b64_to_certs.py）
     --files    国密证书文件名清单（每行一个，便于排除/包含）
     --index    对照表 csv：idx/文件/是否国密/曲线OID/签名OID/SN/指纹/subject/错误
-    --out-dir  把国密证书导出成独立文件（--format der|pem）
+    --out-dir         把国密证书导出成独立文件（--format der|pem）
+    --out-dir-non-gm  把非国密证书导出成独立文件（同一 --format）
 
 用法:
     python3 split_gm_certs.py certs/CFCA全部证书
     python3 split_gm_certs.py certs/CFCA全部证书 --files gm_files.txt --out-dir certs/国密SM2
+    python3 split_gm_certs.py certs/certs_all --out-dir 国密证书 --out-dir-non-gm 非国密证书
     python3 split_gm_certs.py certs/certs_all.jsonl --from-jsonl --jsonl gm505.jsonl
 """
 
@@ -167,10 +169,13 @@ def run(args):
     out_dir = os.path.abspath(args.out_dir) if args.out_dir else None
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
+    non_gm_dir = os.path.abspath(args.out_dir_non_gm) if args.out_dir_non_gm else None
+    if non_gm_dir:
+        os.makedirs(non_gm_dir, exist_ok=True)
 
     # ---- 收集待判定的证书： (idx, 显示名, DER) ----
     gm_rows, index_rows = [], []
-    gm_der = []
+    gm_der, non_gm_der = [], []
     total = 0
     fail = 0
     sig_stat, curve_stat = {}, {}
@@ -196,6 +201,8 @@ def run(args):
         if info["is_gm"]:
             gm_rows.append(idx)
             gm_der.append((idx, name, info["serial_hex"], der))
+        else:
+            non_gm_der.append((idx, name, info["serial_hex"], der))
         if total % 500 == 0:
             print(f"  ... 已扫描 {total}", file=sys.stderr)
 
@@ -245,6 +252,16 @@ def run(args):
                 f.write(der if args.format == "der"
                         else to_pem(der).encode("ascii"))
             written += 1
+    written_non = 0
+    if non_gm_dir:
+        for idx, _name, serial_hex, der in non_gm_der:
+            ext = "." + args.format
+            path = unique_path(
+                os.path.join(non_gm_dir, f"{idx:05d}_{serial_hex}{ext}"))
+            with open(path, "wb") as f:
+                f.write(der if args.format == "der"
+                        else to_pem(der).encode("ascii"))
+            written_non += 1
 
     # ---- 统计 ----
     only_pk = sum(1 for r in index_rows
@@ -254,6 +271,7 @@ def run(args):
     print(f"\n扫描证书     : {total}（解析失败 {fail}）")
     print(f"国密证书     : {len(gm_rows)}"
           f"（仅公钥 SM2 {only_pk} / 仅签名 SM2-SM3 {only_sig}）")
+    print(f"非国密证书   : {len(non_gm_der)}")
     print("签名算法分布 :")
     for oid, n in sorted(sig_stat.items(), key=lambda kv: -kv[1])[:6]:
         tag = f"  <- {GM_SIG_OIDS[oid]}" if oid in GM_SIG_OIDS else ""
@@ -269,7 +287,9 @@ def run(args):
     if args.index:
         print(f"对照表       : {os.path.abspath(args.index)}（{len(index_rows)} 行）")
     if out_dir:
-        print(f"证书文件     : {written} 个 -> {out_dir}/（--format {args.format}）")
+        print(f"国密证书文件 : {written} 个 -> {out_dir}/（--format {args.format}）")
+    if non_gm_dir:
+        print(f"非国密证书文件: {written_non} 个 -> {non_gm_dir}/（--format {args.format}）")
 
 
 def main():
@@ -281,8 +301,9 @@ def main():
     ap.add_argument("--files", help="输出国密证书文件名清单")
     ap.add_argument("--index", help="输出对照表 csv")
     ap.add_argument("--out-dir", help="把国密证书导出成独立文件到该目录")
+    ap.add_argument("--out-dir-non-gm", help="把非国密证书导出成独立文件到该目录")
     ap.add_argument("--format", choices=("der", "pem"), default="der",
-                    help="--out-dir 的文件格式（默认 der）")
+                    help="--out-dir / --out-dir-non-gm 的文件格式（默认 der）")
     run(ap.parse_args())
 
 

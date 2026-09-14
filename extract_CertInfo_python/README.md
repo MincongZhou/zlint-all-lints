@@ -161,8 +161,9 @@ python3 csv_b64_to_certs.py <预处理.csv> --limit 5
 筛选国密证书。`cryptography` 与 zcrypto 均不支持 SM2 曲线与 SM3，国密证书在 zlint 侧无法产出任何规则结果，需要单独归类。
 
 ```bash
-python3 split_gm_certs.py <证书目录|文件...> [--jsonl 子集.jsonl] [--files 清单.txt] [--index 对照表.csv] [--out-dir 目录]
+python3 split_gm_certs.py <证书目录|文件...> [--jsonl 子集.jsonl] [--files 清单.txt] [--index 对照表.csv] [--out-dir 目录] [--out-dir-non-gm 目录]
 python3 split_gm_certs.py <仓库.jsonl> --from-jsonl [...]
+python3 split_gm_certs.py certs/certs_all --out-dir 国密证书 --out-dir-non-gm 非国密证书
 ```
 
 | 参数 | 说明 |
@@ -172,7 +173,8 @@ python3 split_gm_certs.py <仓库.jsonl> --from-jsonl [...]
 | `--files` | 输出国密证书文件名清单（每行一个） |
 | `--index` | 输出对照表 CSV：`idx,file,is_gm,curve_oid,curve_name,sig_oid,sig_name,serial_hex,sha256,subject,pk_error,error` |
 | `--out-dir` | 把国密证书导出为独立文件 |
-| `--format` | `--out-dir` 的文件格式，`der`（默认）/ `pem` |
+| `--out-dir-non-gm` | 把非国密证书导出为独立文件（与 `--out-dir` 一次即可完成双向分类） |
+| `--format` | `--out-dir` / `--out-dir-non-gm` 的文件格式，`der`（默认）/ `pem` |
 
 判定依据（任一命中即为国密）：
 
