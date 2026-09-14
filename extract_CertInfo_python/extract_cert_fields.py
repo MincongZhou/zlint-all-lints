@@ -452,6 +452,26 @@ def parse_public_key(pk):
     return {"type": pk.__class__.__name__}
 
 
+def parse_public_key_safe(cert):
+    """取公钥信息；cryptography 不支持的算法（典型：国密 SM2 曲线 1.2.156.10197.1.301、
+    SM3 摘要）只做降级，不拖垮整张证书 —— 证书其余字段（subject / issuer / 有效期 /
+    扩展 / 指纹）本来都不依赖公钥，仍应正常输出。
+
+    返回结构与 parse_public_key 一致，失败时形如:
+        {"type": "unsupported", "error": "Curve 1.2.156.10197.1.301 is not supported",
+         "algorithm_oid": "1.2.840.10045.2.1", "algorithm": "..."}
+    """
+    try:
+        return parse_public_key(cert.public_key())
+    except Exception as e:  # noqa: BLE001 —— 单个算法不支持不代表证书无法审计
+        info = {"type": "unsupported", "error": str(e)}
+        algo_oid = getattr(cert, "public_key_algorithm_oid", None)
+        if algo_oid is not None:
+            info["algorithm_oid"] = algo_oid.dotted_string
+            info["algorithm"] = oid_name(algo_oid)
+        return info
+
+
 # ---------------------------------------------------------------------------
 # 主解析：证书 → 全字段 dict
 # ---------------------------------------------------------------------------
@@ -490,7 +510,7 @@ def parse_cert(cert):
             "rfc4514": cert.subject.rfc4514_string(),
             "attributes": name_attrs(cert.subject),
         },
-        "public_key": parse_public_key(cert.public_key()),
+        "public_key": parse_public_key_safe(cert),
         "signature_value": {
             "length": len(cert.signature),
             "hex": hex_colon(cert.signature, upper=True),
