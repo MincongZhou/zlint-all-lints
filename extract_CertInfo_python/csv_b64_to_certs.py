@@ -22,6 +22,7 @@
             --jsonl certs_all.jsonl --index certs_all_index.csv
     python3 csv_b64_to_certs.py 预处理-260914.csv --no-files   # 只出 JSONL（先验证）
     python3 csv_b64_to_certs.py certs_all.jsonl --from-jsonl   # 从 JSONL 重新出文件
+                                                              # （源文件即仓库，默认不回写 JSONL）
     python3 csv_b64_to_certs.py 预处理-260914.csv --limit 5    # 冒烟测试
 
 注意:
@@ -144,7 +145,16 @@ def run(args):
 
     src_dir = os.path.dirname(src)
     out_dir = os.path.abspath(args.out_dir or os.path.join(src_dir, "certs_all"))
-    jsonl_path = os.path.abspath(args.jsonl or os.path.join(src_dir, "certs_all.jsonl"))
+    # JSONL 输出：--from-jsonl 时源文件本身就是仓库，默认不再回写；
+    # 显式指定 --jsonl 时禁止指向输入文件（会先清空再读取，把数据吃光）
+    if args.jsonl:
+        jsonl_path = os.path.abspath(args.jsonl)
+    elif args.from_jsonl:
+        jsonl_path = None
+    else:
+        jsonl_path = os.path.join(src_dir, "certs_all.jsonl")
+    if jsonl_path and os.path.exists(jsonl_path) and os.path.samefile(jsonl_path, src):
+        sys.exit(f"错误: --jsonl 不能指向输入文件本身（会先清空再读取）-> {jsonl_path}")
     ext = "." + args.format
 
     if not args.no_files:
@@ -158,12 +168,13 @@ def run(args):
     written = 0
     total = 0
 
-    idx_f = open(jsonl_path, "w", encoding="utf-8")
+    idx_f = open(jsonl_path, "w", encoding="utf-8") if jsonl_path else None
     try:
         for idx, b64, not_before in records:
             total += 1
-            idx_f.write(json.dumps({"idx": idx, "cert_b64": b64},
-                                   ensure_ascii=False) + "\n")
+            if idx_f:
+                idx_f.write(json.dumps({"idx": idx, "cert_b64": b64},
+                                       ensure_ascii=False) + "\n")
 
             der = cert = None
             if b64:
@@ -210,7 +221,8 @@ def run(args):
             if total % 500 == 0:
                 print(f"  ... 已处理 {total} 条", file=sys.stderr)
     finally:
-        idx_f.close()
+        if idx_f:
+            idx_f.close()
 
     if args.index:
         with open(args.index, "w", newline="", encoding="utf-8-sig") as f:
@@ -222,7 +234,7 @@ def run(args):
             w.writerows(index_rows)
 
     print(f"\n读取记录: {total} 条")
-    print(f"JSONL   : {jsonl_path}")
+    print(f"JSONL   : {jsonl_path or '（--from-jsonl：源文件即仓库，未回写）'}")
     if not args.no_files:
         print(f"证书文件: {written} 个 -> {out_dir}/（--format {args.format}）")
     if args.index:
