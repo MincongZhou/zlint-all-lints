@@ -4,7 +4,10 @@ run_ocsp_batch.py —— 批量跑 check_ocsp.py，对每个证书联网查询 O
 
 对给定的证书（单个/多个文件或目录，目录递归搜索 .pem/.crt/.cer/.der/.cert），
 逐张调用 check_certs_python/check_ocsp.py --status 查询，逐张打印结果；
-可选 --csv 输出一张汇总表（cert / status / detail 三列），方便 Excel 打开。
+每张证书另附 DER 编码的 SHA-256 指纹（与 openssl -fingerprint -sha256 一致，
+证书改名 / 重名 / 多版本链同名文件都能唯一对账）；
+可选 --csv 输出一张汇总表（cert / fingerprint_sha256 / status / detail 四列），
+方便 Excel 打开。
 
 用法:
     python3 run_ocsp_batch.py <证书文件|证书目录> [更多...] [--csv 输出.csv] [--timeout 秒] [--der] [--sha256]
@@ -28,9 +31,14 @@ import subprocess
 import sys
 from collections import Counter
 
+from cryptography.hazmat.primitives import hashes
+
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 CHECK_OCSP = os.path.join(PROJECT_ROOT, "check_certs_python", "check_ocsp.py")
 CERT_EXTS = (".pem", ".crt", ".cer", ".der", ".cert")
+
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "check_certs_python"))
+from check_ocsp import load_cert          # noqa: E402  复用 PEM/DER 自动识别
 
 _STATUS_OK = {"GOOD", "REVOKED", "UNKNOWN"}
 
@@ -55,6 +63,17 @@ def collect_certs(paths):
     return sorted(set(certs))
 
 
+def cert_sha256(cert_path, der=False):
+    """证书 DER 编码的 SHA-256 指纹，形如 AA:BB:CC:...（大写十六进制，
+    与 openssl x509 -fingerprint -sha256 的输出一致）。解析失败返回空串。
+    指纹用于对账：证书改名、同名不同版本都能唯一标识，且不受查询成败影响。"""
+    try:
+        with open(cert_path, "rb") as f:
+            return load_cert(f.read(), der).fingerprint(hashes.SHA256()).hex(":").upper()
+    except Exception:
+        return ""
+
+
 def query_one(cert_path, timeout=15, der=False, sha256=False):
     """调用 check_ocsp.py --status 查询单张证书。
     返回 (status, detail)：status ∈ GOOD/REVOKED/UNKNOWN/ERROR"""
@@ -64,22 +83,29 @@ def query_one(cert_path, timeout=15, der=False, sha256=False):
         cmd.append("--der")
     if sha256:
         cmd.append("--sha256")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # 两端都锁死 UTF-8：子进程用 PYTHONIOENCODING 强制 UTF-8 输出，父进程按 UTF-8 解码。
+    # 只设父进程会出乱码（中文 Windows 上子进程默认按 GBK 输出 "无 OCSP 地址"，
+    # 父进程按 utf-8 解就成了 "�� OCSP ��ַ"）；只靠默认解码又会 UnicodeDecodeError
+    # 把 stderr 置空导致 AttributeError 崩溃。errors="replace" 作最后兜底。
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", env=env)
 
     if proc.returncode == 0:
-        line = (proc.stdout.strip().splitlines() or [""])[0]
+        line = ((proc.stdout or "").strip().splitlines() or [""])[0]
         if line.startswith("REVOKED "):          # 格式: REVOKED <吊销时间>
             return "REVOKED", line[len("REVOKED "):].strip()
         return (line if line in _STATUS_OK else "UNKNOWN"), ""
     # 失败: stderr 首行形如 "ERROR: 无 OCSP 地址" / "ERROR: OCSP 查询失败: ..."
-    detail = (proc.stderr.strip().splitlines() or ["ERROR: 未知错误"])[0]
+    detail = ((proc.stderr or "").strip().splitlines() or ["ERROR: 未知错误"])[0]
     if detail.startswith("ERROR: "):
         return "ERROR", detail[len("ERROR: "):].strip()
     return "ERROR", detail
 
 
-def print_result(i, n, cert_path, status, detail):
+def print_result(i, n, cert_path, fpr, status, detail):
     print(f"[{i}/{n}] {cert_path}")
+    print(f"      SHA-256: {fpr or '(解析失败)'}")
     if status in _STATUS_OK:
         print(f"      {status}" + (f"  ({detail})" if detail else ""))
     else:
@@ -90,9 +116,9 @@ def write_csv(path, results):
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8-sig") as f:  # utf-8-sig 方便 Excel
         wr = csv.writer(f)
-        wr.writerow(["cert", "status", "detail"])
-        for cert, status, detail in results:
-            wr.writerow([cert, status, detail])
+        wr.writerow(["cert", "fingerprint_sha256", "status", "detail"])
+        for cert, fpr, status, detail in results:
+            wr.writerow([cert, fpr, status, detail])
 
 
 def batch(paths, csv_path=None, timeout=15, der=False, sha256=False):
@@ -109,18 +135,19 @@ def batch(paths, csv_path=None, timeout=15, der=False, sha256=False):
 
     results = []
     for i, cert in enumerate(certs, 1):
+        fpr = cert_sha256(cert, der)
         status, detail = query_one(cert, timeout, der, sha256)
-        results.append((cert, status, detail))
-        print_result(i, len(certs), cert, status, detail)
+        results.append((cert, fpr, status, detail))
+        print_result(i, len(certs), cert, fpr, status, detail)
 
-    counter = Counter(s for _, s, _ in results)
+    counter = Counter(s for _, _, s, _ in results)
     print("\n============ 批量完成 ============")
     print(f"共 {len(certs)} 张: " +
           " / ".join(f"{k} {counter.get(k, 0)}" for k in
                      sorted(set(counter) | _STATUS_OK,
                             key=lambda x: (x not in _STATUS_OK, x))))
 
-    failed = [(c, d) for c, s, d in results if s == "ERROR"]
+    failed = [(c, d) for c, _, s, d in results if s == "ERROR"]
     if failed:
         print("查询失败:")
         for c, d in failed:
@@ -203,7 +230,8 @@ def main():
         description="批量跑 check_ocsp.py 查询证书 OCSP 状态")
     ap.add_argument("paths", nargs="*", help="证书文件或目录（可多个）")
     ap.add_argument("--csv", dest="csv_path", metavar="输出.csv",
-                    help="把结果写入 CSV 汇总表（cert/status/detail 三列）")
+                    help="把结果写入 CSV 汇总表"
+                         "（cert/fingerprint_sha256/status/detail 四列）")
     ap.add_argument("--timeout", type=int, default=15, help="每张证书超时秒数 (默认 15)")
     ap.add_argument("--der", action="store_true", help="证书按 DER 优先解析")
     ap.add_argument("--sha256", action="store_true",

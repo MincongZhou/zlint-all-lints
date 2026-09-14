@@ -148,7 +148,10 @@ python3 run_ocsp_batch.py certs/www.baidu.com.pem certs/www.qq.com.pem --der
 python3 run_ocsp_batch.py certs/ --sha256
 ```
 
-产物 `/tmp/ocsp_batch.csv`，三列 `cert,status,detail`：
+产物 `/tmp/ocsp_batch.csv`，四列 `cert,fingerprint_sha256,status,detail`
+（`fingerprint_sha256` = 证书 DER 编码的 SHA-256 指纹，大写十六进制，与
+`openssl x509 -fingerprint -sha256` 一致；证书改名 / 重名 / 多版本链同名文件都能唯一定位，
+且解析失败或查询失败时依然有值，便于与台账对账）：
 
 | status | 含义 |
 |---|---|

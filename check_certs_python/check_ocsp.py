@@ -228,6 +228,7 @@ def check_cert(cert_path, issuer_path=None, der=False, status_only=False, timeou
             print(status.name)
         return
 
+    print(f"SHA-256 指纹: {cert.fingerprint(hashes.SHA256()).hex(':').upper()}")
     print(f"序列号:  {response.serial_number}")
     print(f"状态:    {status.name}")
     if status == ocsp.OCSPCertStatus.REVOKED:
