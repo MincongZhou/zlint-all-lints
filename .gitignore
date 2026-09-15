@@ -35,8 +35,14 @@ __pycache__/
 # CFCA 批量查询脚本输出（query_cfca_certs*.sh -> cfca_cert_info*.txt）
 /cfca_cert_info*.txt
 
-# 临时调试脚本
-/temp.sh
+# 临时调试脚本 / 临时产物（仅根目录；/tmp* /temp* 已覆盖原 /temp.sh）
+/tmp*
+/temp*
+/out*.txt
+/out*.log
 
 # CT 日志草稿工作区（ct_log/ 目录 + crt.sh 查询脚本）
 /ct_log_draft/
+
+# 根目录批量提取产物（extract_cert_fields 对 certs/<目录> 的宽表输出）
+/CFCA_Identity*.csv
