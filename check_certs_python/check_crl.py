@@ -17,7 +17,7 @@ zlint 对 CRL 输入会执行全部 CRL 类规则；本脚本负责"下载 + 格
     python3 check_crl.py <证书路径> [--timeout 秒] [--out 输出.pem]
     python3 check_crl.py                                # 无参数 → 交互模式
 
-依赖: cryptography；同目录 check_ocsp.py（复用其下载与 PEM/DER 识别逻辑）
+依赖: cryptography；同目录 check_ocsp.py（复用其下载、PEM/DER 识别与 UTF-8 输出设置）
 """
 
 import os
@@ -27,7 +27,8 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import ExtensionOID
 
-from check_ocsp import fetch_url, load_cert  # 复用：UA/兜底 https/重试 的下载 + 证书自动识别
+from check_ocsp import (enable_utf8_output, fetch_url,  # 复用：下载 + 证书识别 + UTF-8
+                        load_cert)
 
 
 def get_cdp_urls(cert):
@@ -123,6 +124,7 @@ def interactive():
 
 
 def main():
+    enable_utf8_output()
     args = sys.argv[1:]
 
     if not args:                    # 没有任何参数 → 交互模式

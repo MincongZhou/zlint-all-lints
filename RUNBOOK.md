@@ -146,7 +146,18 @@ python3 run_ocsp_batch.py certs/www.baidu.com.pem certs/www.qq.com.pem --der
 
 # ③ CertID 摘要换 SHA-256（默认 SHA-1，兼容性最好）
 python3 run_ocsp_batch.py certs/ --sha256
+
+# ④ 签发者证书放本地目录（CA 的 AIA 没给 CA Issuers 时必须）
+python3 run_ocsp_batch.py certs/ --issuer-dir ./mycas --issuer-dir ~/cfca
 ```
+
+**签发者证书**（OCSP 的 CertID 必须用它构造）按优先级查找：
+`--issuer-dir` 指定目录 → 默认目录 `<项目根>/issuers` → 证书 AIA 里的 `CA Issuers`。
+批量开始时只扫一次目录，按证书 AKI 反查签发者 SKI，逐张命中即复用；
+取到的签发者一律做 AKI/SKI 校验，不匹配立即报错 —— 否则会算出错误的 CertID，
+responder 回 `UNAUTHORIZED`，看起来像"服务端拒绝"，其实只是传错了签发者。
+很多 CA（如 CFCA Identity 体系）的 AIA 只给 OCSP 地址、不给 `CA Issuers`，
+这类证书必须靠前两级，否则只能得到 `ERROR: 加载签发者证书失败`。
 
 产物 `/tmp/ocsp_batch.csv`，四列 `cert,fingerprint_sha256,status,detail`
 （`fingerprint_sha256` = 证书 DER 编码的 SHA-256 指纹，大写十六进制，与
@@ -159,6 +170,7 @@ python3 run_ocsp_batch.py certs/ --sha256
 | `REVOKED` | 已吊销 |
 | `UNKNOWN` | responder 不认识该证书 |
 | `ERROR` | 查询失败（无 OCSP 地址 / 签发者加载失败 / 网络不通 / 响应非成功），原因见 `detail` |
+| `ERROR` 且 detail = `UNAUTHORIZED` | responder 不受理该 CertID：该 CA 体系根本不提供 OCSP（吊销状态只能靠 CRL 判断），或签发者传错（已被 AKI/SKI 校验拦住，不会静默算错） |
 
 **退出码**：全部成功返回 `0`，出现 `ERROR` 返回 `1`，便于脚本判断。
 
@@ -252,6 +264,8 @@ CSV 均为 **UTF-8 with BOM**，Excel / WPS 双击即可正常显示中文。
 | `go build` 报 `reading ../zlint/v3/go.mod: file does not exist` | `~/projects/zlint` 缺失 → `git clone https://github.com/zmap/zlint.git` |
 | `错误: 需要 cryptography >= 42.0（当前 x.y）` | `pip3 install -U cryptography`（受管环境加 `--break-system-packages`） |
 | OCSP 批量大量 `ERROR: 无 OCSP 地址` | 证书没有 AIA/OCSP 地址（自签或内部证书），属正常 |
+| OCSP 批量大量 `ERROR: 加载签发者证书失败` | 证书 AIA 没有 `CA Issuers`（如 CFCA Identity 体系），且签发者目录里没有匹配的证书 → 把签发者证书放进 `<项目根>/issuers/`，或用 `--issuer-dir` 指定 |
+| OCSP 报 `ERROR: 加载签发者证书失败: 签发者与证书不匹配` | 传错了签发者证书（AKI/SKI 对不上）→ 换成该证书真正的签发者 |
 | `run_cert_crl_ocsp.py` 某侧显示跳过 | 无 CDP / OCSP 地址或网络不通，只影响该侧，其它侧照跑 |
 | 提取脚本跑完没生成文件 | 默认只在终端输出，需显式加 `--csv` / `--out` |
 | 目录里混入 CRL / OCSP 导致证书解析报错 | `extract_cert_fields.py` 会自动跳过并告警；也可只传证书文件 |
@@ -275,6 +289,7 @@ CSV 均为 **UTF-8 with BOM**，Excel / WPS 双击即可正常显示中文。
 | 批量 OCSP 状态 | `python3 run_ocsp_batch.py <目录> --csv out.csv --timeout 10` |
 | 三类规则一起跑 | `python3 run_cert_crl_ocsp.py <证书\|目录> <输出目录> [--detail]` |
 | 单张 OCSP 查询 | `python3 check_certs_python/check_ocsp.py <证书> [签发者证书] --status` |
+| 单张 OCSP + 签发者目录 | `python3 check_certs_python/check_ocsp.py <证书> --issuer-dir <目录> --status` |
 | 单张 CRL 下载 | `python3 check_certs_python/check_crl.py <证书> --out crl.pem` |
 | CRL / OCSP 一致性核验 | `python3 check_certs_python/check_revocation_consistency.py <证书\|目录> [--csv 结果.csv]` |
 | CFCA 批量：证书信息 + OCSP 状态 | `./query_cfca_certs.sh <目录> [输出.txt]` |

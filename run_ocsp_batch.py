@@ -9,15 +9,28 @@ run_ocsp_batch.py —— 批量跑 check_ocsp.py，对每个证书联网查询 O
 可选 --csv 输出一张汇总表（cert / fingerprint_sha256 / status / detail 四列），
 方便 Excel 打开。
 
+签发者证书（OCSP 的 CertID 必须用它构造）来源，按优先级:
+    1. --issuer-dir 指定的目录（可多次）
+    2. 默认目录 <项目根>/issuers
+    3. 证书 AIA 里的 CA Issuers 地址（联网下载，由 check_ocsp.py 兜底）
+批量开始时只扫一次目录、按证书 AKI 反查签发者 SKI，逐张命中即复用；
+命中不到才回落到 AIA。很多 CA（如 CFCA Identity 体系）的 AIA 只给 OCSP 地址、
+不给 CA Issuers，这类证书必须靠 1 或 2，否则只能得到
+"ERROR: 加载签发者证书失败"。
+
 用法:
-    python3 run_ocsp_batch.py <证书文件|证书目录> [更多...] [--csv 输出.csv] [--timeout 秒] [--der] [--sha256]
+    python3 run_ocsp_batch.py <证书文件|证书目录> [更多...] [--csv 输出.csv] [--timeout 秒] [--der] [--sha256] [--issuer-dir 目录]
     python3 run_ocsp_batch.py certs/ --csv results/ocsp_batch.csv --timeout 10
     python3 run_ocsp_batch.py a.pem b.pem c.pem --der
     python3 run_ocsp_batch.py certs/ --sha256       # CertID 用 SHA-256（默认 SHA-1，兼容性最好）
+    python3 run_ocsp_batch.py certs/ --issuer-dir ./mycas --issuer-dir ~/cfca
     python3 run_ocsp_batch.py                        # 无参数 → 交互模式
 
 状态取值: GOOD / REVOKED / UNKNOWN（查询成功）；ERROR（无 OCSP 地址、
 签发者加载失败、网络不通、响应非成功等，详见 detail 列）。
+其中 detail 为 UNAUTHORIZED 时表示 responder 不受理该 CertID —— 多因该 CA 体系
+根本不提供 OCSP（此时吊销状态只能靠 CRL 判断），或签发者传错（已由 check_ocsp.py
+的 AKI/SKI 校验拦住，不会静默算错）。
 
 退出码: 全部证书查询成功返回 0，有 ERROR 返回 1。
 """
@@ -38,7 +51,8 @@ CHECK_OCSP = os.path.join(PROJECT_ROOT, "check_certs_python", "check_ocsp.py")
 CERT_EXTS = (".pem", ".crt", ".cer", ".der", ".cert")
 
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "check_certs_python"))
-from check_ocsp import load_cert          # noqa: E402  复用 PEM/DER 自动识别
+from check_ocsp import (build_issuer_index, enable_utf8_output,  # noqa: E402
+                        find_issuer, load_cert, DEFAULT_ISSUER_DIR)
 
 _STATUS_OK = {"GOOD", "REVOKED", "UNKNOWN"}
 
@@ -74,11 +88,28 @@ def cert_sha256(cert_path, der=False):
         return ""
 
 
-def query_one(cert_path, timeout=15, der=False, sha256=False):
+def resolve_issuer(cert_path, index, der=False):
+    """用签发者目录索引给证书找签发者，返回证书路径；找不到/解析失败返回 None
+    （返回 None 时交给 check_ocsp.py 用 AIA 的 CA Issuers 兜底）"""
+    try:
+        with open(cert_path, "rb") as f:
+            cert = load_cert(f.read(), der)
+    except Exception:
+        return None
+    try:
+        return find_issuer(cert, index)
+    except Exception:
+        return None
+
+
+def query_one(cert_path, timeout=15, der=False, sha256=False, issuer_path=None):
     """调用 check_ocsp.py --status 查询单张证书。
+    issuer_path 非空时显式传给子进程，省得它再扫一遍签发者目录。
     返回 (status, detail)：status ∈ GOOD/REVOKED/UNKNOWN/ERROR"""
     cmd = [sys.executable, CHECK_OCSP, cert_path, "--status",
            "--timeout", str(timeout)]
+    if issuer_path:
+        cmd += ["--issuer", issuer_path]
     if der:
         cmd.append("--der")
     if sha256:
@@ -103,9 +134,11 @@ def query_one(cert_path, timeout=15, der=False, sha256=False):
     return "ERROR", detail
 
 
-def print_result(i, n, cert_path, fpr, status, detail):
+def print_result(i, n, cert_path, fpr, status, detail, issuer_path=None):
     print(f"[{i}/{n}] {cert_path}")
     print(f"      SHA-256: {fpr or '(解析失败)'}")
+    if issuer_path:
+        print(f"      签发者: {issuer_path}")
     if status in _STATUS_OK:
         print(f"      {status}" + (f"  ({detail})" if detail else ""))
     else:
@@ -121,7 +154,8 @@ def write_csv(path, results):
             wr.writerow([cert, fpr, status, detail])
 
 
-def batch(paths, csv_path=None, timeout=15, der=False, sha256=False):
+def batch(paths, csv_path=None, timeout=15, der=False, sha256=False,
+          issuer_dirs=None):
     """批量主流程，返回退出码"""
     if not os.path.isfile(CHECK_OCSP):
         err(f"找不到 {CHECK_OCSP}")
@@ -131,14 +165,21 @@ def batch(paths, csv_path=None, timeout=15, der=False, sha256=False):
     if not certs:
         err("没有找到任何证书文件（支持 " + " ".join(CERT_EXTS) + "）")
         return 1
-    print(f"批量模式: 发现 {len(certs)} 个证书（timeout={timeout}s）\n")
+
+    # 签发者目录只扫一次，之后逐张按 AKI 反查复用
+    dirs = [DEFAULT_ISSUER_DIR] if issuer_dirs is None else issuer_dirs
+    by_ski, by_dn = build_issuer_index(dirs)
+    print(f"批量模式: 发现 {len(certs)} 个证书（timeout={timeout}s）")
+    print(f"签发者目录: {', '.join(dirs) if dirs else '(未配置)'}"
+          f"（索引 {len(by_ski)} 个 SKI / {len(by_dn)} 个 subject DN）\n")
 
     results = []
     for i, cert in enumerate(certs, 1):
         fpr = cert_sha256(cert, der)
-        status, detail = query_one(cert, timeout, der, sha256)
+        issuer_path = resolve_issuer(cert, (by_ski, by_dn), der)
+        status, detail = query_one(cert, timeout, der, sha256, issuer_path)
         results.append((cert, fpr, status, detail))
-        print_result(i, len(certs), cert, fpr, status, detail)
+        print_result(i, len(certs), cert, fpr, status, detail, issuer_path)
 
     counter = Counter(s for _, _, s, _ in results)
     print("\n============ 批量完成 ============")
@@ -221,11 +262,18 @@ def interactive():
     except ValueError:
         print(f"  !! '{t}' 不是数字，按默认 15 处理")
         timeout = 15
+    idir = input(f"签发者目录 (回车用默认 {DEFAULT_ISSUER_DIR}，"
+                 "逗号分隔可多个): ").strip()
+    if idir.lower() in ("q", "quit"):
+        sys.exit(0)
+    issuer_dirs = [os.path.expanduser(x).strip()
+                   for x in idir.split(",") if x.strip()] or None
     der = input("DER 格式 (y/N): ").strip().lower() in ("y", "yes")
-    sys.exit(batch(paths, csv_path, timeout, der))
+    sys.exit(batch(paths, csv_path, timeout, der, issuer_dirs=issuer_dirs))
 
 
 def main():
+    enable_utf8_output()
     ap = argparse.ArgumentParser(
         description="批量跑 check_ocsp.py 查询证书 OCSP 状态")
     ap.add_argument("paths", nargs="*", help="证书文件或目录（可多个）")
@@ -236,12 +284,17 @@ def main():
     ap.add_argument("--der", action="store_true", help="证书按 DER 优先解析")
     ap.add_argument("--sha256", action="store_true",
                     help="CertID 摘要用 SHA-256（默认 SHA-1，兼容性最好）")
+    ap.add_argument("--issuer-dir", action="append", metavar="目录",
+                    help="签发者证书目录（可多次）；批量开始时扫一次，"
+                         "按证书 AKI 反查签发者 SKI 自动匹配。"
+                         f"指定后不再使用默认目录 {DEFAULT_ISSUER_DIR}")
     args = ap.parse_args()
 
     if not args.paths:          # 无任何路径 → 交互模式
         interactive()
         return
-    sys.exit(batch(args.paths, args.csv_path, args.timeout, args.der, args.sha256))
+    sys.exit(batch(args.paths, args.csv_path, args.timeout, args.der,
+                   args.sha256, args.issuer_dir))
 
 
 if __name__ == "__main__":

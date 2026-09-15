@@ -14,7 +14,7 @@ CT 审计、组织名 / SCT 提取、追链寻根等其它功能不在本分支�
 
 | 脚本 | 用途 |
 |---|---|
-| `check_certs_python/check_ocsp.py` | 单张证书查 OCSP：从 AIA 取 responder 与签发者，输出 GOOD / REVOKED / UNKNOWN |
+| `check_certs_python/check_ocsp.py` | 单张证书查 OCSP：从 AIA 取 responder；签发者按 `--issuer` → 签发者目录（默认 `<项目根>/issuers`）→ AIA 的 `CA Issuers` 顺序获取并校验 AKI/SKI；输出 GOOD / REVOKED / UNKNOWN |
 | `check_certs_python/check_crl.py` | 单张证书从 CDP 下载 CRL 并转 PEM |
 | `check_certs_python/check_revocation_consistency.py` | CRL 与 OCSP 两渠道吊销信息交叉核验（状态 / 吊销时间 / 原因） |
 | `query_cfca_certs.sh` | 批量导出证书关键信息 + OCSP 吊销状态，结果汇总进 txt |

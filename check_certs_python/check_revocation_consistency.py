@@ -57,8 +57,8 @@ from cryptography import x509
 from cryptography.x509 import ocsp
 from cryptography.x509.oid import ExtensionOID
 
-from check_ocsp import (fetch_url, load_cert, get_aia_urls, load_issuer,
-                        query_ocsp)
+from check_ocsp import (enable_utf8_output, fetch_url, get_aia_urls,
+                        load_cert, load_issuer, query_ocsp)
 from check_crl import get_cdp_urls
 
 CERT_EXTS = (".pem", ".crt", ".cer", ".der", ".cert")
@@ -409,6 +409,7 @@ def collect_certs(paths):
 
 
 def main():
+    enable_utf8_output()
     ap = argparse.ArgumentParser(
         description="交叉核验 CRL 与 OCSP 的吊销信息一致性",
         formatter_class=argparse.RawDescriptionHelpFormatter,
