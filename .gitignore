@@ -37,3 +37,6 @@ __pycache__/
 
 # 临时调试脚本
 /temp.sh
+
+# CT 日志草稿工作区（ct_log/ 目录 + crt.sh 查询脚本）
+/ct_log_draft/
