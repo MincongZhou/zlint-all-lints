@@ -13,7 +13,7 @@ extract_cert_fields.py —— 用 cryptography 解析 X.509 证书的所有字�
       NameConstraints / TLSFeature / OCSPNoCheck / PrecertPoison / SCT /
       MSCertificateTemplate / FreshestCRL / IssuingDistributionPoint /
       未知扩展以 hex 原文展示等）
-  5. 指纹: SHA-256（另有 SHA-1，供对照）
+  5. 指纹: SHA-256（另有 SHA-1，供对照）—— 64 位大写十六进制、不带冒号
 
 依赖: cryptography >= 42.0（运行时自动检查；pip install -U cryptography）。
 
@@ -516,8 +516,11 @@ def parse_cert(cert):
             "hex": hex_colon(cert.signature, upper=True),
         },
         "fingerprints": {
-            "sha256": hex_colon(cert.fingerprint(hashes.SHA256()), upper=True),
-            "sha1": hex_colon(cert.fingerprint(hashes.SHA1()), upper=True),
+            # 指纹用 64 位大写十六进制、不带冒号（与 run_ocsp_batch.py 的 CSV、
+            # run_cert_crl_ocsp.py 的 index.csv 口径一致，便于直接粘进 Excel 对账）；
+            # 其余 hex 字段（SKI/AKI/签名值/扩展原文）仍保持冒号分隔
+            "sha256": cert.fingerprint(hashes.SHA256()).hex().upper(),
+            "sha1": cert.fingerprint(hashes.SHA1()).hex().upper(),
         },
         "extensions": parse_extensions(cert),
     }

@@ -4,8 +4,9 @@ run_ocsp_batch.py —— 批量跑 check_ocsp.py，对每个证书联网查询 O
 
 对给定的证书（单个/多个文件或目录，目录递归搜索 .pem/.crt/.cer/.der/.cert），
 逐张调用 check_certs_python/check_ocsp.py --status 查询，逐张打印结果；
-每张证书另附 DER 编码的 SHA-256 指纹（与 openssl -fingerprint -sha256 一致，
-证书改名 / 重名 / 多版本链同名文件都能唯一对账）；
+每张证书另附 DER 编码的 SHA-256 指纹（64 位大写十六进制、无冒号，即
+openssl x509 -fingerprint -sha256 去掉冒号后的形式，便于粘进 Excel/台账），
+证书改名 / 重名 / 多版本链同名文件都能唯一对账；
 可选 --csv 输出一张汇总表（cert / fingerprint_sha256 / not_before / not_after /
 status / detail 六列），方便 Excel 打开。
 其中 not_before / not_after 为证书有效期，从证书本地解析（ISO 8601 UTC，
@@ -93,8 +94,8 @@ def iso_utc(dt):
 def cert_meta(cert_path, der=False):
     """读证书，返回 (指纹, not_before, not_after)。解析失败三者都返回空串。
 
-    指纹 = DER 编码的 SHA-256，形如 AA:BB:CC:...（大写十六进制，与
-    openssl x509 -fingerprint -sha256 的输出一致），用于对账：证书改名、
+    指纹 = DER 编码的 SHA-256，64 位大写十六进制、无冒号（即
+    openssl x509 -fingerprint -sha256 去掉冒号后的形式），用于对账：证书改名、
     同名不同版本都能唯一标识，且不受查询成败影响。
     not_before / not_after = 证书有效期，ISO 8601 UTC（与 openssl -dates 一致）。
     """
@@ -103,7 +104,7 @@ def cert_meta(cert_path, der=False):
             cert = load_cert(f.read(), der)
     except Exception:
         return "", "", ""
-    fpr = cert.fingerprint(hashes.SHA256()).hex(":").upper()
+    fpr = cert.fingerprint(hashes.SHA256()).hex().upper()   # 无冒号，方便对账粘贴
     nb = getattr(cert, "not_valid_before_utc", None)
     na = getattr(cert, "not_valid_after_utc", None)
     if nb is None or na is None:        # cryptography < 42 无 *_utc 属性，退回旧属性

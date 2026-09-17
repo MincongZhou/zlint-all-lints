@@ -28,7 +28,7 @@ extract_crl_fields.py —— CRL 吊销清单 + 全字段提取（对齐 extract
 覆盖字段（RFC 5280 CRL 结构）:
   CRL 级: version(推断) / issuer(逐条属性) / thisUpdate / nextUpdate /
           signatureAlgorithm(OID+hash) / signature / tbsCertList(SHA-256) /
-          指纹(SHA-256, SHA-1) / 全部扩展（CRLNumber / AKI / IDP /
+          指纹(SHA-256, SHA-1，64 位大写十六进制、无冒号) / 全部扩展（CRLNumber / AKI / IDP /
           DeltaCRLIndicator / FreshestCRL / AIA / IAN / 未知扩展 hex 原文）
   条目级: serialNumber(hex+dec) / revocationDate / CRLReason /
           InvalidityDate / CertificateIssuer / 其它条目扩展
@@ -360,8 +360,10 @@ def parse_crl(crl, path, fmt, issuer_pub=None, issuer_subject=None):
     version_label = "v2" if has_exts else "v1"
 
     def fp(alg):
+        # 指纹用 64 位大写十六进制、不带冒号（与 run_ocsp_batch.py / index.csv 口径一致）；
+        # 其余 hex 字段（AKI/签名值/扩展原文）仍保持冒号分隔
         try:
-            return hex_colon(crl.fingerprint(alg), upper=True)
+            return crl.fingerprint(alg).hex().upper()
         except Exception:
             return None
 
@@ -418,10 +420,11 @@ def _iso(dt):
 
 
 def _sha256(data):
+    """字节串的 SHA-256，64 位大写十六进制、不带冒号（指纹口径，与上面 fp() 一致）"""
     from cryptography.hazmat.primitives import hashes as _h
     d = _h.Hash(_h.SHA256())
     d.update(data)
-    return hex_colon(d.finalize(), upper=True)
+    return d.finalize().hex().upper()
 
 
 # ---------------------------------------------------------------------------

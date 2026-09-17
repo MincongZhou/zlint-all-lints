@@ -161,8 +161,8 @@ responder 回 `UNAUTHORIZED`，看起来像"服务端拒绝"，其实只是传�
 
 产物 `/tmp/ocsp_batch.csv`，六列
 `cert,fingerprint_sha256,not_before,not_after,status,detail`
-（`fingerprint_sha256` = 证书 DER 编码的 SHA-256 指纹，大写十六进制，与
-`openssl x509 -fingerprint -sha256` 一致；`not_before` / `not_after` = 证书有效期，
+（`fingerprint_sha256` = 证书 DER 编码的 SHA-256 指纹，**64 位大写十六进制、无冒号**
+（即 `openssl x509 -fingerprint -sha256` 去掉冒号后的形式）；`not_before` / `not_after` = 证书有效期，
 ISO 8601 UTC，与 `openssl x509 -noout -dates` 一致。这几列都从证书本地解析，
 证书改名 / 重名 / 多版本链同名文件都能唯一定位，且解析失败或查询失败时依然有值，
 便于与台账对账）：
@@ -199,10 +199,16 @@ python3 run_cert_crl_ocsp.py certs/www.baidu.com.pem /tmp/three --detail
 ├── ca_summary.csv       全部证书的证书侧汇总
 ├── crl_summary.csv      全部证书的 CRL 侧汇总
 ├── ocsp_summary.csv     全部证书的 OCSP 侧汇总
+├── index.csv            证书索引：cert / fingerprint_sha256（无冒号）/ not_before /
+│                        not_after / path / crl_pem / resp_der
 └── www.baidu.com/       每证书目录（只留联网证据文件）
     ├── crl.pem          从 CDP 下载的 CRL（有则）
     └── resp.der         原始 OCSP 响应（有则）
 ```
+
+三张 `*_summary.csv` 里**没有指纹**（zlint 的 CSV 输出本身不含指纹），只用 `cert` 列
+（证书名，同名时带父目录前缀 `__`）标识证书；需要指纹或有效期时，用 `index.csv` 按
+`cert` 列 join 即可。
 
 终端会打印三侧统计（实测示例）：
 
