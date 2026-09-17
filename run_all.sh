@@ -59,6 +59,10 @@ usage() {
   --out <目录>    输出目录（等价第 2 个位置参数；输出目录名是纯数字时用它消歧）
   --timeout <秒>  联网超时秒数（等价第 3 个位置参数）
   --refresh-crl   透传给 ①：忽略 CRL 缓存，强制重新下载
+  --fast          整轮交给同目录的 run_all_fast.py：第 ④ 步优先复用第 ① 步已存的
+                  OCSP 响应（<输出>/<stem>/resp.der），取不到（没有 / 已过期 / 响应
+                  不成功）才联网；其余三步与原来完全相同。
+                  不加此项时第 ④ 步按原逻辑逐张联网查询（默认行为，保证证据最新）
   -h, --help      显示本帮助
 
 示例:
@@ -67,6 +71,7 @@ usage() {
   ./run_all.sh "certs/CFCA订户证书" results/CFCA订户证书 10 --only 2,4
   ./run_all.sh "certs/CFCA订户证书" results/CFCA订户证书 10 --skip 1,3
   ./run_all.sh certs/ --out results/all --timeout 15 --refresh-crl
+  ./run_all.sh "certs/CFCA订户证书" results/CFCA订户证书 15 --fast
 
 输出目录不填时默认 results/<输入目录名>；只给证书路径和一个纯数字时该数字按
 超时秒数处理（输出目录名是纯数字请用 --out 显式指定）。
@@ -79,6 +84,7 @@ TIMEOUT=15
 ONLY=""
 SKIP=""
 REFRESH_CRL=0     # 1 = 透传 --refresh-crl 给 ①
+FAST_MODE=0       # 1 = 整轮交给 run_all_fast.py（第 ④ 步改用本地 OCSP 响应）
 SET_OUT=0         # 输出目录是否已确定（--out 或第 2 个位置参数）
 SET_TIMEOUT=0     # 超时秒数是否已确定（--timeout 或第 3 个位置参数）
 
@@ -111,9 +117,10 @@ while [ $# -gt 0 ]; do
                   esac
                   SET_TIMEOUT=1; shift ;;
         --refresh-crl) REFRESH_CRL=1; shift ;;
+        -fast|--fast) FAST_MODE=1; shift ;;
         -h|--help) usage; exit 0 ;;
         -*)
-            echo "未知选项: $1（可用: --only / --skip / --no-lint / --out / --timeout / --refresh-crl / -h）" >&2
+            echo "未知选项: $1（可用: --only / --skip / --no-lint / --out / --timeout / --refresh-crl / --fast / -h）" >&2
             exit 2
             ;;
         *)
@@ -196,6 +203,18 @@ fi
 if ! mkdir -p "$OUT"; then
     echo "无法创建输出目录: $OUT" >&2
     exit 1
+fi
+
+# --fast：把整轮交给同目录的 run_all_fast.py。
+# 它跑的 ①②③ 与本脚本完全一致（同样 subprocess 调用项目里的三个脚本），
+# 只有第 ④ 步改成「优先复用第 ① 步已存的 OCSP 响应」，所以可以整体接管。
+# 全部 --only / --skip / --timeout / --refresh-crl 都透传过去。
+if [ "$FAST_MODE" -eq 1 ]; then
+    FAST_ARGS=("$TARGET" "$OUT" "$TIMEOUT")
+    [ -n "$ONLY" ] && FAST_ARGS+=(--only "$ONLY")
+    [ -n "$SKIP" ] && FAST_ARGS+=(--skip "$SKIP")
+    [ "$REFRESH_CRL" -eq 1 ] && FAST_ARGS+=(--refresh-crl)
+    exec python3 "$SCRIPT_DIR/run_all_fast.py" "${FAST_ARGS[@]}"
 fi
 
 STEP=0

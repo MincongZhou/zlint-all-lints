@@ -298,6 +298,7 @@ python3 run_cert_crl_ocsp.py certs/ /tmp/three --refresh-crl
 ./run_all.sh "certs/CFCA订户证书" results/x 10 --skip 1,3         # 跳过 1) 三类规则、3) CRL 字段
 ./run_all.sh "certs/CFCA订户证书" results/x 10 --no-lint          # 等价 --skip 1（最省时）
 ./run_all.sh certs/ --out results/all --timeout 15 --refresh-crl  # 选项写法：强制重下 CRL
+./run_all.sh "certs/CFCA订户证书" results/x 15 --fast             # 第 4 步复用本地 OCSP 响应（见下方小节）
 ./run_all.sh -h                                                  # 帮助
 ```
 
@@ -316,7 +317,53 @@ python3 run_cert_crl_ocsp.py certs/ /tmp/three --refresh-crl
 | `--out <目录>` | 指定输出目录（等价第 2 个位置参数；输出目录名是纯数字时用它消歧） |
 | `--timeout <秒>` | 联网超时秒数（等价第 3 个位置参数） |
 | `--refresh-crl` | 透传给第 1 步：忽略 CRL 缓存强制重新下载 |
+| `--fast` | 第 4 步改为复用本地 OCSP 响应（详见下方「`--fast`：第 4 步复用本地 OCSP 响应」）；不加则逐张联网查询 |
 | `-h, --help` | 显示帮助 |
+
+#### `--fast`：第 4 步复用本地 OCSP 响应
+
+第 1 步（`run_cert_crl_ocsp.py`）为了跑 zlint 的 OCSP 类规则，已经对每张证书查过一次
+OCSP，并把原始响应存成 `<输出目录>/<证书名>/resp.der`；第 4 步（`run_ocsp_batch.py`）
+又**对同一个 responder 重新联网查一遍**，只为拿 `GOOD / REVOKED / UNKNOWN` 这个状态列。
+同一批查询因此被做了两次，是整个跑批最大的耗时点。
+
+`--fast` 把整轮交给同目录的 `run_all_fast.py`：第 1、2、3 步照旧（同样 subprocess 调用
+项目里的三个脚本），**只有第 4 步**改成——先在本地解析已有的 `resp.der` 取状态，
+取不到才联网：
+
+```bash
+./run_all.sh "certs/CFCA订户证书" results/x 15 --fast
+python3 run_all_fast.py "certs/CFCA订户证书" results/x 15     # 等价的直接调用
+```
+
+复用要同时满足三条，任一条不满足就回落到联网：
+
+1. `index.csv` 里该证书有 `resp_der` 记录，且对应文件存在
+2. OCSP 响应的 `response_status` 为 SUCCESSFUL（`tryLater` / `unauthorized` 等一律当作没有）
+3. 响应新鲜——`next_update` 未过期；响应没带 `next_update` 时按
+   `this_update + 168 小时` 判定（可用 `--max-age-hours` 调整）
+
+**实测（CFCA订户证书_ct_log，8142 张，2026-09-18）**
+
+| 方式 | 耗时 | 联网次数 |
+|---|---|---|
+| 原第 4 步（逐张联网） | 约 55 分钟 | 8142 |
+| `--only 4 --fast` | **8.9 秒** | 29（都是没有 `resp.der` 的证书） |
+
+结果与逐张联网的 `ocsp_batch.csv` **8142/8142 完全一致**（含 REVOKED 的吊销时间字符串）。
+
+什么时候用 / 什么时候没用：
+
+- ✅ 重跑、补跑第 4 步，或输出目录里已有第 1 步产物时——最划算
+- ✅ `--only 1,4`：第 1 步刚产出 `resp.der`，第 4 步立刻复用
+- ⚠️ **全新输出目录且跳过第 1 步**（`--skip 1` / `--no-lint`）时没有可复用内容，
+  第 4 步会退化为逐张联网，此时加不加 `--fast` 没有差别
+- ⚠️ 需要「本次实时取证」（合规、举证场景）时**不要加**：复用用的是已有响应，
+  默认行为才是每张当场查
+
+`--fast` **不改变跑哪些步骤**：`--only / --skip / --no-lint` 完全照旧生效并透传，
+参数校验也仍在 `run_all.sh` 里先完成（例如 `--only 1 --no-lint --fast` 依旧报
+「四步都被跳过」、退出码 2，与不加 `--fast` 一致）。只有真正要跑第 4 步时它才有意义。
 
 约定与注意：
 

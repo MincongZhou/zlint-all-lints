@@ -52,3 +52,12 @@ _crl_cache/
 
 # 根目录批量提取产物（extract_cert_fields 对 certs/<目录> 的宽表输出）
 /CFCA_Identity*.csv
+
+# CFCA CPS文档
+/CFCA
+
+# 跑批日志（根目录的 run.log / <数据集>_ct_log.log 等，都是几 MB 的运行输出）
+*.log
+
+# 工具数据目录（CodeBuddy 工作记忆等，不入库）
+/.codebuddy/
