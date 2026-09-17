@@ -38,6 +38,10 @@
 # 输出目录名是纯数字时需显式用 --out）。CSV 一律 UTF-8 with BOM，指纹无冒号。
 set -u
 
+# 保存原始调用命令行：下面的参数解析会用 shift 消耗 $@，先留一份供日志回溯
+INVOKED_AS="$0"
+ORIG_ARGS=("$@")
+
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 cd "$SCRIPT_DIR" || exit 1
 
@@ -205,6 +209,29 @@ if ! mkdir -p "$OUT"; then
     exit 1
 fi
 
+# 记录本次调用的命令行，便于事后从日志确认"这批结果是用什么参数跑出来的"。
+# 用 %q 逐个引述参数，含空格的路径也能原样复制出来重跑。
+printf 'Command: %s' "$INVOKED_AS"
+[ "${#ORIG_ARGS[@]}" -gt 0 ] && printf ' %q' "${ORIG_ARGS[@]}"
+printf '\n'
+
+# 运行概要（目标/输出/超时/执行步骤/开始）。必须打在下面 exec 之前：
+# --fast 模式会在此处交棒给 run_all_fast.py，之后的语句都不会执行。
+EXEC=""
+for i in 0 1 2 3; do
+    [ "${RUN[$i]}" -eq 1 ] && EXEC="${EXEC}${EXEC:+ }$((i + 1))"
+done
+
+echo "目标: $TARGET"
+echo "输出: $OUT"
+echo "超时: ${TIMEOUT}s"
+echo "执行步骤: $EXEC / 4 （①②③④）"
+if [ "${RUN[0]}" -eq 0 ]; then
+    echo "  跳过 ① 的后果: 不生成 ca_summary / crl_summary / ocsp_summary / index.csv；"
+    echo "                ③ 只能沿用输出目录里已有的 crl.pem（没有则自动跳过）"
+fi
+echo "开始: $(date '+%F %T')"
+
 # --fast：把整轮交给同目录的 run_all_fast.py。
 # 它跑的 ①②③ 与本脚本完全一致（同样 subprocess 调用项目里的三个脚本），
 # 只有第 ④ 步改成「优先复用第 ① 步已存的 OCSP 响应」，所以可以整体接管。
@@ -223,21 +250,6 @@ step() {                       # 依次打印 [n/总数] 步骤标题（只统�
     echo
     echo "===== [$STEP/$TOTAL] $* ====="
 }
-
-EXEC=""
-for i in 0 1 2 3; do
-    [ "${RUN[$i]}" -eq 1 ] && EXEC="${EXEC}${EXEC:+ }$((i + 1))"
-done
-
-echo "目标: $TARGET"
-echo "输出: $OUT"
-echo "超时: ${TIMEOUT}s"
-echo "执行步骤: $EXEC / 4 （①②③④）"
-if [ "${RUN[0]}" -eq 0 ]; then
-    echo "  跳过 ① 的后果: 不生成 ca_summary / crl_summary / ocsp_summary / index.csv；"
-    echo "                ③ 只能沿用输出目录里已有的 crl.pem（没有则自动跳过）"
-fi
-echo "开始: $(date '+%F %T')"
 
 # ---------- ① 三类规则（顺带把 CRL / OCSP 证据下到 $OUT/<证书名>/）----------
 if [ "${RUN[0]}" -eq 1 ]; then
