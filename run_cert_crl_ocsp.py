@@ -20,7 +20,8 @@ CRL 下载按 CDP URL 去重：CRL 是"签发者 + 分区"级文件，同一份 
 crl.pem 证据文件）；批量结束会打印「实际下载 / 命中缓存 / 无 CRL 可下」的次数。
 
 用法:
-    python3 run_cert_crl_ocsp.py <证书路径|证书目录> [输出目录] [--timeout 秒] [--detail]
+    python3 run_cert_crl_ocsp.py <证书路径|证书目录> [输出目录]
+                                 [--timeout 秒] [--detail] [--refresh-crl]
     python3 run_cert_crl_ocsp.py                                # 无参数 → 交互模式
 
 输出（默认"精简模式"：批量多张证书也只留三张按侧汇总表 + 证书索引 + 每证书的证据文件）:
@@ -35,7 +36,11 @@ crl.pem 证据文件）；批量结束会打印「实际下载 / 命中缓存 / 
     │                         path, crl_pem, resp_der
     ├── _crl_cache/           CRL 去重缓存：同一 CDP URL 只下载一次（crl_<url哈希>.pem），
     │                         其余指向同一 URL 的证书直接复制缓存，联网量降到
-    │                         「唯一 CDP URL 数」；整个目录可随时删除
+    │                         「唯一 CDP URL 数」；整个目录可随时删除。
+    │                         缓存以 CRL 自身的 nextUpdate 判定是否仍新鲜：已过期
+    │                         （或缺 nextUpdate 且文件超过 24h）视为陈旧，自动重新
+    │                         下载，避免复跑同一输出目录时把上一轮的旧 CRL 当作
+    │                         本次证据；--refresh-crl 可强制忽略全部缓存重下
     └── <证书名>/             每证书目录，只留联网证据（zlint 中间 JSON/CSV 已删）
         ├── crl.pem           该证书对应的 CRL（PEM，有则；可能是缓存复制来的）
         └── resp.der          原始 OCSP 响应（有则）
@@ -58,6 +63,7 @@ crl.pem 证据文件）；批量结束会打印「实际下载 / 命中缓存 / 
 """
 
 import csv
+import datetime
 import glob
 import hashlib
 import json
@@ -65,6 +71,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from collections import Counter
 
 from cryptography import x509
@@ -81,6 +88,7 @@ _SUMMARY_FILE = {"证书侧": "ca_summary.csv", "CRL 侧": "crl_summary.csv",
                  "OCSP 侧": "ocsp_summary.csv"}
 _INDEX_FILE = "index.csv"        # 证书索引表（汇总表只有证书名，指纹/有效期在这张表里）
 _CRL_CACHE_DIR = "_crl_cache"    # CRL 按 CDP URL 去重的缓存目录（与 <证书名>/ 同级）
+_CRL_CACHE_TTL = 24 * 3600       # 缓存 CRL 缺 nextUpdate 时的兜底有效期（秒）
 
 # 复用 run_ocsp_batch 的 cert_meta()：指纹与有效期用同一套解析口径，
 # 保证 index.csv 的 fingerprint_sha256 与 run_ocsp_batch.py 输出的完全一致
@@ -115,6 +123,9 @@ def merge_csv(src_csv, summary_csv, prefix):
     with open(summary_csv, "a", newline="", encoding="utf-8") as f:
         wr = csv.writer(f)
         if is_new:
+            # BOM 只在首次建表时写一次（追加时再写会变成文件中部的多余字节）；
+            # 效果等同 write_index 的 utf-8-sig，保证 Excel 双击表头不乱码
+            f.write("\ufeff")
             wr.writerow(["cert"] + header)
         for r in data:
             wr.writerow([prefix] + r)
@@ -160,13 +171,44 @@ def crl_bytes_to_pem(raw):
     return x509.load_der_x509_crl(raw).public_bytes(serialization.Encoding.PEM)
 
 
-def fetch_crl_cached(cert_path, out_pem, cache_dir, timeout=15):
+def _crl_cache_fresh(path, now=None):
+    """缓存 CRL 是否仍新鲜到可以复用。
+
+    以 CRL 自身的 nextUpdate 为准：已过期即视为陈旧 —— 宁可重新下载，也不把上一轮
+    的旧 CRL 当成"本轮证据"（CRL 会随吊销更新重发，旧文件的吊销集合可能不完整）。
+    nextUpdate 缺失（RFC 5280 允许）时退化为文件 mtime 的 24h TTL。
+    """
+    try:
+        with open(path, "rb") as f:
+            crl = x509.load_pem_x509_crl(f.read())
+    except Exception:                       # 缓存损坏 / 不是 CRL → 当作陈旧
+        return False
+    next_update = getattr(crl, "next_update_utc", None)
+    if next_update is None:                 # cryptography < 42 的旧属性（naive UTC）
+        try:
+            next_update = crl.next_update
+        except Exception:
+            next_update = None
+    if next_update is not None:
+        if next_update.tzinfo is None:
+            next_update = next_update.replace(tzinfo=datetime.timezone.utc)
+        return next_update > (now or datetime.datetime.now(datetime.timezone.utc))
+    try:
+        return (time.time() - os.path.getmtime(path)) < _CRL_CACHE_TTL
+    except OSError:
+        return False
+
+
+def fetch_crl_cached(cert_path, out_pem, cache_dir, timeout=15, refresh=False):
     """按证书 CDP 下载 CRL：同一 URL 只下一次（缓存到 cache_dir），再复制到 out_pem
 
     返回 (是否成功, 命中的 URL 或 None, 是否来自缓存)。
     多个 CDP 分发点逐个尝试，全部失败返回 False（调用方跳过 CRL 侧）。
     每张证书仍各有自己的 crl.pem（证据文件布局不变），但网络下载量降到
     「唯一 CDP URL 数」而不是「证书数」。
+
+    缓存按 CRL 的 nextUpdate 判定新鲜度（见 _crl_cache_fresh）：陈旧则重新下载，
+    避免复跑同一输出目录时复用过期证据；refresh=True 完全忽略缓存强制重下。
     """
     try:
         with open(cert_path, "rb") as f:
@@ -184,10 +226,12 @@ def fetch_crl_cached(cert_path, out_pem, cache_dir, timeout=15):
 
     for url in urls:
         cached = crl_cache_file(cache_dir, url)
-        if os.path.isfile(cached):
-            shutil.copyfile(cached, out_pem)
-            _CRL_STATS["hit"] += 1
-            return True, url, True
+        if not refresh and os.path.isfile(cached):
+            if _crl_cache_fresh(cached):
+                shutil.copyfile(cached, out_pem)
+                _CRL_STATS["hit"] += 1
+                return True, url, True
+            print(f"  缓存已陈旧（nextUpdate 已过），重新下载: {url}")
         print(f"  下载 CRL: {url}")
         try:
             pem = crl_bytes_to_pem(fetch_url(url, timeout=timeout))
@@ -270,11 +314,13 @@ def dedupe_stems(cert_paths):
     return names
 
 
-def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
+def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None,
+            refresh_crl=False):
     """跑单张证书：证书侧 + CRL 侧 + OCSP 侧，各侧结果合并进输出根下的三张汇总表。
     默认精简模式（只留 *_summary.csv + crl.pem / resp.der 证据文件）；
     detail=True 保留每张证书的全部中间产物（json/csv/pem/der）。
     stem 为显示名/子目录名（默认取文件名去扩展名；批量时由 dedupe_stems 去重）。
+    refresh_crl=True 时忽略 CRL 缓存强制重新下载。
     返回 (是否全部 OK, 索引表记录 dict)"""
     stem = stem or os.path.splitext(os.path.basename(cert_path))[0]
     summary_dir = out_root or os.path.join(PROJECT_ROOT, "results")
@@ -308,8 +354,13 @@ def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
     # ---------- [2/3] CRL 侧：按 CDP URL 去重下载 → 跑全部 CRL 类规则 ----------
     print(f"\n===== [2/3] CRL 侧（按 CDP URL 去重下载 → 全部 CRL 类规则，联网） =====")
     crl_pem = os.path.join(out_dir, "crl.pem")
+    # 上一轮可能留下 crl.pem：本轮没下到就必须让它消失，否则 run_all.sh 的 CRL
+    # 字段步会把这份陈旧证据当作本次结果解析（index.csv 与磁盘还会互相矛盾）
+    if os.path.isfile(crl_pem):
+        os.remove(crl_pem)
     ok_crl, crl_url, from_cache = fetch_crl_cached(
-        cert_path, crl_pem, os.path.join(summary_dir, _CRL_CACHE_DIR), timeout)
+        cert_path, crl_pem, os.path.join(summary_dir, _CRL_CACHE_DIR), timeout,
+        refresh=refresh_crl)
     if ok_crl:
         print(f"  CRL 来源: {'缓存命中' if from_cache else '本次下载'}  {crl_url}")
         rc, itype = lint_one(crl_pem,
@@ -326,6 +377,8 @@ def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
     # ---------- [3/3] OCSP 侧：查询并保存原始响应 → 跑全部 OCSP 类规则 ----------
     print(f"\n===== [3/3] OCSP 侧（查 OCSP 并存原始响应 → 全部 OCSP 类规则，联网） =====")
     resp_der = os.path.join(out_dir, "resp.der")
+    if os.path.isfile(resp_der):        # 同上：旧响应不能冒充本次证据
+        os.remove(resp_der)
     rc = subprocess.call([sys.executable, CHECK_OCSP, cert_path,
                           "--respout", resp_der, "--status",
                           "--timeout", str(timeout)])
@@ -383,7 +436,7 @@ def print_crl_stats():
           f"无 CRL 可下 {_CRL_STATS['fail']} 次")
 
 
-def run_target(target, out_root=None, timeout=15, detail=False):
+def run_target(target, out_root=None, timeout=15, detail=False, refresh_crl=False):
     """依赖检查 + 单个/批量分发（target 已展开 ~）"""
     if not os.path.exists(target):
         err(f"路径不存在 -> {target}")
@@ -404,7 +457,9 @@ def run_target(target, out_root=None, timeout=15, detail=False):
     print(f"三张汇总表重建于: {summary_dir}/"
           f"（{', '.join(_SUMMARY_FILE.values())}；另有 {_INDEX_FILE} 证书索引）")
     print(f"CRL 缓存目录: {os.path.join(summary_dir, _CRL_CACHE_DIR)}/"
-          f"（同一 CDP URL 只下载一次，后续证书直接复制缓存）")
+          f"（同一 CDP URL 只下载一次，后续证书直接复制缓存；"
+          f"缓存过 nextUpdate 自动重下"
+          + ("；本次 --refresh-crl 强制全部重下" if refresh_crl else "") + "）")
 
     if os.path.isdir(target):
         # ---------- 批量：遍历目录下所有证书 ----------
@@ -423,7 +478,8 @@ def run_target(target, out_root=None, timeout=15, detail=False):
         ok_all, ok, fail, records = True, 0, [], []
         for i, c in enumerate(certs, 1):
             print(f"\n{'='*60}\n[{i}/{len(certs)}] {c}\n{'='*60}")
-            ok_one, rec = run_one(c, summary_dir, timeout, detail, stem=names[c])
+            ok_one, rec = run_one(c, summary_dir, timeout, detail,
+                                  stem=names[c], refresh_crl=refresh_crl)
             records.append(rec)
             ok_all &= ok_one
             if ok_one:
@@ -441,7 +497,8 @@ def run_target(target, out_root=None, timeout=15, detail=False):
         sys.exit(0 if ok_all else 1)
     else:
         # ---------- 单个证书 ----------
-        ok, rec = run_one(target, summary_dir, timeout, detail)
+        ok, rec = run_one(target, summary_dir, timeout, detail,
+                          refresh_crl=refresh_crl)
         index_path = os.path.join(summary_dir, _INDEX_FILE)
         write_index(index_path, [rec])
         print(f"证书索引: {index_path}（1 行）")
@@ -482,6 +539,19 @@ def interactive():
     run_target(target, out_dir or None, timeout, detail)
 
 
+def _int_arg(value, flag):
+    """解析整数选项值：缺值 / 非数字 / 非正数都直接报错退出，不吐 traceback"""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        err(f"{flag} 需要整数秒数，收到: {value!r}")
+        sys.exit(2)
+    if n <= 0:
+        err(f"{flag} 必须为正整数，收到: {n}")
+        sys.exit(2)
+    return n
+
+
 def main():
     args = sys.argv[1:]
     if not args:                    # 没有任何参数 → 交互模式
@@ -493,26 +563,33 @@ def main():
 
     timeout = 15
     detail = False
+    refresh_crl = False
     rest = []
     i = 0
     while i < len(args):
         if args[i] == "--timeout":
-            timeout = int(args[i + 1])
+            if i + 1 >= len(args):
+                err("--timeout 缺少秒数，如 --timeout 15")
+                sys.exit(2)
+            timeout = _int_arg(args[i + 1], "--timeout")
             i += 2
         elif args[i] == "--detail":
             detail = True
+            i += 1
+        elif args[i] == "--refresh-crl":
+            refresh_crl = True
             i += 1
         else:
             rest.append(args[i])
             i += 1
     if not rest:
         print("用法: python3 run_cert_crl_ocsp.py <证书路径|目录> [输出目录] "
-              "[--timeout 秒] [--detail]")
+              "[--timeout 秒] [--detail] [--refresh-crl]")
         sys.exit(1)
 
     target = os.path.expanduser(rest[0])
     out_root = os.path.expanduser(rest[1]) if len(rest) > 1 else None
-    run_target(target, out_root, timeout, detail)
+    run_target(target, out_root, timeout, detail, refresh_crl)
 
 
 if __name__ == "__main__":

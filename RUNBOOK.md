@@ -134,6 +134,12 @@ python3 extract_CertInfo_python/extract_crl_fields.py ~/share/allCRL.crl \
 - `--csv-mode`：`revoked`（默认）/ `entries` / `wide` / `fields`
 - 大 CA 的 CRL 可达数万条，`wide` 只放吊销条数，逐条看 `*_entries.csv`
 - 可选 `--json`（JSON 输出）、`--no-ext-columns`（宽表只输出固定列）
+- `--paths-from <列表文件>`：从文件逐行读输入路径（`-` 表示 stdin，空行与 `#` 注释忽略）。
+  路径成千上万时直接写进命令行会触发 `Argument list too long`，这时改用列表文件传参
+  （`run_all.sh` 的 CRL 字段步就是这么传的）：
+  `ls results/x/*/crl.pem > /tmp/crls.txt` 后
+  `python3 extract_CertInfo_python/extract_crl_fields.py --paths-from /tmp/crls.txt --csv out.csv --csv-mode wide`
+- 写 CSV 时是「边解析边累积结果行」，不会把所有 CRL 的完整解析结果同时留在内存里
 - **输入就是本地 CRL，本步不联网**（下载 CRL 见 3.4 的 CDP 流程或 `check_crl.py`）：
   单个 CRL 文件（显式路径不看扩展名）、目录（递归 `.pem/.der/.crl`）、多路径混传都行；
   `--csv` 的输出文件会自动从输入里排除。同一目录混放多个体系的 CRL 时靠
@@ -220,6 +226,9 @@ python3 run_cert_crl_ocsp.py certs/ /tmp/three --timeout 15
 
 # ③ 保留每张证书的完整中间产物（cert / crl / ocsp 的 json + csv）
 python3 run_cert_crl_ocsp.py certs/www.baidu.com.pem /tmp/three --detail
+
+# ④ 忽略 CRL 缓存，强制重新下载（默认只有缓存过了 nextUpdate 才重下）
+python3 run_cert_crl_ocsp.py certs/ /tmp/three --refresh-crl
 ```
 
 产物（默认精简模式）：
@@ -232,7 +241,10 @@ python3 run_cert_crl_ocsp.py certs/www.baidu.com.pem /tmp/three --detail
 ├── index.csv            证书索引：cert / fingerprint_sha256（无冒号）/ not_before /
 │                        not_after / path / crl_pem / resp_der
 ├── _crl_cache/          CRL 去重缓存：同一 CDP URL 只下载一次（crl_<url哈希>.pem），
-│                        可随时删除，下次跑会重新下
+│                        可随时删除。缓存以 CRL 自身的 nextUpdate 为有效期：已过期
+│                        （或缺 nextUpdate 且文件超过 24h）就自动重新下载，复跑同一
+│                        输出目录不会拿上一轮的旧 CRL 当本次证据；--refresh-crl
+│                        可强制忽略全部缓存重下
 └── www.baidu.com/       每证书目录（只留联网证据文件）
     ├── crl.pem          该证书对应的 CRL（有则；可能是从缓存复制来的）
     └── resp.der         原始 OCSP 响应（有则）
@@ -257,6 +269,12 @@ python3 run_cert_crl_ocsp.py certs/www.baidu.com.pem /tmp/three --detail
   首个命中某 URL 的证书触发下载并缓存到 `_crl_cache/`，其余指向同一 URL 的证书直接
   复制缓存（每张证书仍各有自己的 `crl.pem`）。批量结束打印
   `CRL 去重统计: 实际下载 N 次，命中缓存 M 次，无 CRL 可下 K 次`
+- 缓存**不是永久有效**：命中前会看缓存 CRL 的 `nextUpdate`，已过期的当作陈旧并重新下载，
+  避免复跑同一输出目录时把上一轮的旧 CRL（吊销集合可能不完整）当成"本轮证据"。想不等
+  `nextUpdate` 就直接重下，加 `--refresh-crl`
+- 每张证书开跑前会先删掉自己目录里**上一轮遗留**的 `crl.pem`（OCSP 的 `resp.der` 同理）：
+  本轮没取到证据时目录里不会有旧文件冒充本次结果，`run_all.sh` 的 CRL 字段步也就不会
+  解析到陈旧 CRL
 - 去重效果实测（`certs/CFCA_CA证书`，19 张证书 / 15 张有 CDP）：5 个唯一 URL，
   下载 **15 次 → 5 次**，CRL 下载环节 **2.78 s → 0.45 s（−84%）**（单次下载约 146 ms，
   缓存命中是文件复制，约 0.09 ms）；整脚本 19 张约 9.4 s → **7.2 s**——省下的只有下载
@@ -279,6 +297,7 @@ python3 run_cert_crl_ocsp.py certs/www.baidu.com.pem /tmp/three --detail
 ./run_all.sh "certs/CFCA订户证书" results/x 10 --only 2,4         # 只跑 2) 证书字段 + 4) OCSP 状态
 ./run_all.sh "certs/CFCA订户证书" results/x 10 --skip 1,3         # 跳过 1) 三类规则、3) CRL 字段
 ./run_all.sh "certs/CFCA订户证书" results/x 10 --no-lint          # 等价 --skip 1（最省时）
+./run_all.sh certs/ --out results/all --timeout 15 --refresh-crl  # 选项写法：强制重下 CRL
 ./run_all.sh -h                                                  # 帮助
 ```
 
@@ -289,19 +308,34 @@ python3 run_cert_crl_ocsp.py certs/www.baidu.com.pem /tmp/three --detail
 |---|---|
 | `--only <步骤>` | 只跑列出的步骤。步骤号：`1` 证书/CRL/OCSP 三类 lint、`2` 证书字段、`3` CRL 字段、`4` OCSP 状态 |
 | `--skip <步骤>` | 跳过列出的步骤（`--no-lint` 等价 `--skip 1`）；`--skip` 优先级高于 `--only` |
+
+其它选项：
+
+| 选项 | 含义 |
+|---|---|
+| `--out <目录>` | 指定输出目录（等价第 2 个位置参数；输出目录名是纯数字时用它消歧） |
+| `--timeout <秒>` | 联网超时秒数（等价第 3 个位置参数） |
+| `--refresh-crl` | 透传给第 1 步：忽略 CRL 缓存强制重新下载 |
 | `-h, --help` | 显示帮助 |
 
 约定与注意：
 
-- 输出目录不填时默认 `results/<输入目录名>`；选项与位置参数可混排，也支持 `--only=2,4`
-- **CRL 字段步依赖三类规则步**：跳过后者时，若输出目录里还留着上次的 `<证书名>/crl.pem`，
-  它仍会解析该文件；否则自动跳过
+- 输出目录不填时默认 `results/<输入目录名>`；选项与位置参数可混排，也支持
+  `--only=2,4` / `--out=xxx` / `--timeout=15` 这类等号写法
+- 只给了证书路径和**一个纯数字**位置参数时，该数字按超时秒数处理（输出目录名是纯数字
+  请用 `--out`）；第 4 个及以后的位置参数会直接报错，不再静默覆盖超时
+- **CRL 字段步依赖三类规则步**：跳过后者时，输出目录里**已有的** `<证书名>/crl.pem`
+  仍会被解析；跑了后者时每张证书会先清掉自己目录里上一轮的 `crl.pem`，只留本轮证据，
+  因此不会解析到陈旧 CRL
 - 跳过三类规则步则不生成 `ca_summary.csv` / `crl_summary.csv` / `ocsp_summary.csv` / `index.csv`
+  （输出目录里若已有上轮的这些文件会原样留着，不算本次产物）
 - 单张证书也会强制 `--csv-mode wide`，保证与目录输入的表结构一致（一张证书也占一行）
 - 屏幕上的步骤编号按**实际执行**的步骤重排（如 `[1/2]`、`[2/2]`），结尾打印产物清单
 - 规模大时建议 `--skip 1`：三类规则步是「每张证书跑 3 次 zlint + 取一次 CRL + 查一次
   OCSP」，上千张仍会非常慢——CRL 下载已按 CDP URL 去重，但 **zlint 与 OCSP 都是逐张串行**，
   省不下来
+- CRL 字段步把每份 `<证书名>/crl.pem` 通过列表文件（`--paths-from`）交给
+  `extract_crl_fields.py`，上万份也不会撞上命令行长度上限
 - CRL 字段步的输入是「每证书一份 `<证书名>/crl.pem`」，同一份 CRL 会因此出现多次
   （本仓库 19 张 CA 证书 → 宽表 15 行但只有 4 份唯一 CRL，条目表 85 行但真实吊销记录 14 条）。
   做统计前先按 `tbs_sha256` 去重，详见 3.2 最后一条
@@ -353,7 +387,8 @@ r=list(csv.DictReader(open('/tmp/ocsp_batch.csv',encoding='utf-8-sig')))
 print(Counter(x['status'] for x in r))"
 ```
 
-CSV 均为 **UTF-8 with BOM**，Excel / WPS 双击即可正常显示中文。
+CSV（含 `ca_summary.csv` / `crl_summary.csv` / `ocsp_summary.csv` 三张汇总表）均为
+**UTF-8 with BOM**，Excel / WPS 双击即可正常显示中文。
 
 ---
 
@@ -388,10 +423,12 @@ CSV 均为 **UTF-8 with BOM**，Excel / WPS 双击即可正常显示中文。
 | CRL 批量宽表 | `python3 extract_CertInfo_python/extract_crl_fields.py <目录> --csv out.csv --csv-mode wide` |
 | CRL 验签 | `python3 extract_CertInfo_python/extract_crl_fields.py <crl> --issuer ca.pem` |
 | 批量 OCSP 状态 | `python3 run_ocsp_batch.py <目录> --csv out.csv --timeout 10` |
-| 三类规则一起跑 | `python3 run_cert_crl_ocsp.py <证书\|目录> <输出目录> [--detail]` |
+| 三类规则一起跑 | `python3 run_cert_crl_ocsp.py <证书\|目录> <输出目录> [--detail] [--refresh-crl]` |
 | 一键跑齐四件套 | `./run_all.sh <证书\|目录> [输出目录] [超时秒数] [选步参数]` |
 | 只跑证书字段 + OCSP 状态 | `./run_all.sh <证书\|目录> <输出目录> 15 --only 2,4` |
 | 跳过三类 lint（最省时） | `./run_all.sh <证书\|目录> <输出目录> 15 --no-lint` |
+| 强制重下 CRL（忽略缓存） | `./run_all.sh <证书\|目录> <输出目录> --refresh-crl` |
+| CRL 批量（路径列表文件） | `python3 extract_CertInfo_python/extract_crl_fields.py --paths-from list.txt --csv out.csv --csv-mode wide` |
 | 单张 OCSP 查询 | `python3 check_certs_python/check_ocsp.py <证书> [签发者证书] --status` |
 | 单张 OCSP + 签发者目录 | `python3 check_certs_python/check_ocsp.py <证书> --issuer-dir <目录> --status` |
 | 单张 CRL 下载 | `python3 check_certs_python/check_crl.py <证书> --out crl.pem` |
