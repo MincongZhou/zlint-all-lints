@@ -9,6 +9,7 @@ CT 审计、组织名 / SCT 提取、追链寻根等其它功能不在本分支�
 | 2 | CRL 全字段提取 + 吊销清单 | `extract_CertInfo_python/extract_crl_fields.py` | 否 |
 | 3 | 批量查询证书 OCSP 状态 | `run_ocsp_batch.py` | 是 |
 | 4 | 一张证书跑齐 zlint 的 CA / CRL / OCSP 三类规则 | `run_cert_crl_ocsp.py` | 是 |
+| 5 | 一键跑齐 1–4（可选用哪几步） | `run_all.sh` | 视步骤（1、4 联网） |
 
 另有几个配套脚本（同样属于本分支范围）：
 
@@ -82,6 +83,11 @@ python3 run_ocsp_batch.py certs/ --csv ocsp_batch.csv --timeout 10
 
 # 4) 一张证书跑齐三类 zlint 规则（联网，需先 ./build.sh）
 python3 run_cert_crl_ocsp.py certs/ results_three --timeout 15
+
+# 5) 一键跑齐上面四步（可选只跑其中几步）
+./run_all.sh certs/ results_all 15              # 四步全跑
+./run_all.sh certs/ results_all 15 --only 2,4   # 只跑 2) 证书字段 + 4) OCSP 状态
+./run_all.sh certs/ results_all 15 --no-lint    # 跳过 1) 三类 lint（等价 --skip 1）
 ```
 
 无参数运行任一脚本会进入交互模式。CFCA 整链批量查询：
@@ -102,6 +108,7 @@ python3 run_cert_crl_ocsp.py certs/ results_three --timeout 15
 ├── build.sh                         编译 zlint-all-lints / extract-cert
 ├── run_ocsp_batch.py                任务 3
 ├── run_cert_crl_ocsp.py             任务 4
+├── run_all.sh                       一键跑齐任务 1–4（--only / --skip / --no-lint 选步）
 ├── query_cfca_certs.sh              CFCA 批量：证书信息 + OCSP 状态
 ├── query_cfca_certs_raw_ocsp.sh     CFCA 批量：证书信息 + OCSP 原文
 ├── check_certs_python/

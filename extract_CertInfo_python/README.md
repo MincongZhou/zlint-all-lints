@@ -22,6 +22,8 @@
 
 用 `cryptography` 解析 X.509 证书的字段，覆盖 RFC 5280 结构：基础字段（version / serialNumber / signatureAlgorithm / issuer / validity / subject / subjectPublicKeyInfo / signature）、issuer 与 subject 的逐条 Name 属性、公钥参数、全部扩展、SHA-256 与 SHA-1 指纹。
 
+指纹为 **64 位大写十六进制、不带冒号**（与 `run_ocsp_batch.py` 的 CSV、`run_cert_crl_ocsp.py` 的 `index.csv` 口径一致，便于直接粘进 Excel 对账）；其余 hex 字段（SKI / AKI / SCT log_id / 签名值 / 扩展原文）仍保持冒号分隔。
+
 ```bash
 python3 extract_cert_fields.py <证书路径> [--der] [--json] [--out 输出文件]
 python3 extract_cert_fields.py <证书路径> --csv 输出.csv [--csv-mode fields|summary|wide]
@@ -56,6 +58,15 @@ CSV 三种模式：
 ## extract_crl_fields.py
 
 解析 CRL 的吊销清单与完整字段，字段口径与 `extract_cert_fields.py` 对齐。CRL 级覆盖 version / issuer（逐条属性）/ thisUpdate / nextUpdate / signatureAlgorithm / signature / tbsCertList 指纹 / 全部扩展（CRLNumber、AKI、IDP、DeltaCRLIndicator、FreshestCRL、AIA、IAN、未知扩展原文等）；条目级覆盖 serialNumber（hex + dec）/ revocationDate / CRLReason / InvalidityDate / CertificateIssuer / 其它条目扩展。
+
+**输入就是本地 CRL，本脚本不联网**（下载 CRL 是 `check_certs_python/check_crl.py`、`run_cert_crl_ocsp.py` 的事）。可以直接传自己准备的 CRL：
+
+- 单个文件：显式路径不看扩展名（`my.crl`、`x.bin` 都能读）
+- 目录：递归匹配 `.pem` / `.der` / `.crl`
+- 多路径混传；`--csv 输出.csv` 的输出文件会自动从输入中排除，避免"上次的输出被当输入"
+- 同一目录混放多个体系的 CRL 时会全部解析，靠 `issuer_cn` / `crl_number` / `tbs_sha256` 区分；要确认归属就加 `--issuer` 验签
+- 指纹（`sha256` / `sha1` / `tbs_sha256`）为 **64 位大写十六进制、不带冒号**；其它 hex 字段保持冒号分隔。`sha256` 是整份 CRL（含签名）的指纹，`tbs_sha256` 是不含签名的"内容指纹"——ECC 的 CRL 每次重签整体指纹都会变，判断吊销数据有无变化应看 `tbs_sha256` 或 `crl_number`
+- **同一份 CRL 传入多次就输出多行**（`wide` / `entries` 都不做内容去重）：`run_all.sh` 的 CRL 字段步会把每张证书的 `crl.pem` 都传进来，19 张 CA 证书实际只有 4 份唯一 CRL，于是宽表 15 行、条目表 85 行（真实吊销记录 14 条）。统计前按 `tbs_sha256` 去重即可；**不要用 `crl_number`**——各 CA 的计数器独立（CFCA 的 `Global ECC ROOT G2` 与 `Global RSA ROOT G2` 都发到 913）
 
 ```bash
 python3 extract_crl_fields.py <crl 文件|目录> ... [--csv 输出.csv] [--issuer 签发者证书]

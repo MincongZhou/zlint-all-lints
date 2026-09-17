@@ -7,11 +7,17 @@ OCSP→OCSP 类），其余标 NA。本脚本把证书的"配套吊销对象"也
 让三类规则全部真实执行:
 
     1. 证书侧:  zlint-all-lints -cert <证书>           → cert.json / cert.csv（全部 CA 类规则）
-    2. CRL 侧:  check_crl.py 从证书 CDP 下载 CRL 转 PEM → zlint-all-lints 跑全部 CRL 类规则
+    2. CRL 侧:  按证书 CDP 下载 CRL 转 PEM（同一 CDP URL 只下载一次，缓存复用）→
+                zlint-all-lints 跑全部 CRL 类规则
     3. OCSP 侧: check_ocsp.py 查 OCSP 并存原始 DER 响应 → zlint-all-lints 跑全部 OCSP 类规则
 
 CRL / OCSP 步骤联网失败（无 CDP / 无 OCSP 地址 / 网络不通 / 下载超时）时自动跳过，
 只影响对应侧规则，不中断整体。
+
+CRL 下载按 CDP URL 去重：CRL 是"签发者 + 分区"级文件，同一份 CRL 覆盖该 CA 下所有
+证书，所以上万张证书通常只有几十~几百个唯一 URL。首次命中某 URL 时下载一次并缓存到
+<输出>/_crl_cache/，之后指向同一 URL 的证书直接复制缓存（每张证书仍各有自己的
+crl.pem 证据文件）；批量结束会打印「实际下载 / 命中缓存 / 无 CRL 可下」的次数。
 
 用法:
     python3 run_cert_crl_ocsp.py <证书路径|证书目录> [输出目录] [--timeout 秒] [--detail]
@@ -27,9 +33,15 @@ CRL / OCSP 步骤联网失败（无 CDP / 无 OCSP 地址 / 网络不通 / 下�
     │                         对账时用本表按 cert 列 join：
     │                         cert, fingerprint_sha256, not_before, not_after,
     │                         path, crl_pem, resp_der
+    ├── _crl_cache/           CRL 去重缓存：同一 CDP URL 只下载一次（crl_<url哈希>.pem），
+    │                         其余指向同一 URL 的证书直接复制缓存，联网量降到
+    │                         「唯一 CDP URL 数」；整个目录可随时删除
     └── <证书名>/             每证书目录，只留联网证据（zlint 中间 JSON/CSV 已删）
-        ├── crl.pem           从 CDP 下载的 CRL（PEM，有则）
+        ├── crl.pem           该证书对应的 CRL（PEM，有则；可能是缓存复制来的）
         └── resp.der          原始 OCSP 响应（有则）
+
+批量结束时打印一行「CRL 去重统计: 实际下载 N 次，命中缓存 M 次，无 CRL 可下 K 次」，
+便于核对去重效果（例如 19 张 CA 证书只有 4 份唯一 CRL 时，N 应接近 4）。
 
 批量时如遇重名证书文件（如不同版本链里的同名 cer），自动逐级补父目录前缀
 （__ 连接）生成唯一名，子目录名与汇总表 cert 列同用，不会互相覆盖。
@@ -47,15 +59,19 @@ CRL / OCSP 步骤联网失败（无 CDP / 无 OCSP 地址 / 网络不通 / 下�
 
 import csv
 import glob
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from collections import Counter
 
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 ZLINT_BIN = os.path.join(PROJECT_ROOT, "zlint-all-lints")
-CHECK_CRL = os.path.join(PROJECT_ROOT, "check_certs_python", "check_crl.py")
 CHECK_OCSP = os.path.join(PROJECT_ROOT, "check_certs_python", "check_ocsp.py")
 CERT_EXTS = (".pem", ".crt", ".cer", ".der", ".cert")
 
@@ -64,12 +80,20 @@ _SIDE_FILE = {"证书侧": "cert", "CRL 侧": "crl", "OCSP 侧": "ocsp"}
 _SUMMARY_FILE = {"证书侧": "ca_summary.csv", "CRL 侧": "crl_summary.csv",
                  "OCSP 侧": "ocsp_summary.csv"}
 _INDEX_FILE = "index.csv"        # 证书索引表（汇总表只有证书名，指纹/有效期在这张表里）
+_CRL_CACHE_DIR = "_crl_cache"    # CRL 按 CDP URL 去重的缓存目录（与 <证书名>/ 同级）
 
 # 复用 run_ocsp_batch 的 cert_meta()：指纹与有效期用同一套解析口径，
 # 保证 index.csv 的 fingerprint_sha256 与 run_ocsp_batch.py 输出的完全一致
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 from run_ocsp_batch import cert_meta  # noqa: E402
+
+# 复用 check_certs_python 里的 CDP 解析与下载（与 check_crl.py 同一套实现）
+CHECK_DIR = os.path.join(PROJECT_ROOT, "check_certs_python")
+if CHECK_DIR not in sys.path:
+    sys.path.insert(0, CHECK_DIR)
+from check_crl import get_cdp_urls      # noqa: E402
+from check_ocsp import fetch_url, load_cert  # noqa: E402
 
 
 
@@ -111,6 +135,75 @@ def write_index(path, records):
         for r in records:
             wr.writerow([r["cert"], r["fingerprint_sha256"], r["not_before"],
                          r["not_after"], r["path"], r["crl_pem"], r["resp_der"]])
+
+
+# ---------- CRL 下载 + 按 CDP URL 去重缓存 ----------
+
+_CRL_STATS = {"download": 0, "hit": 0, "fail": 0}    # 实际下载 / 命中缓存 / 无 CRL 可下
+
+
+def crl_cache_file(cache_dir, url):
+    """缓存文件路径：用 URL 的 sha256 前 16 位命名（URL 里的路径/特殊字符不适合做文件名）"""
+    h = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+    return os.path.join(cache_dir, f"crl_{h}.pem")
+
+
+def crl_bytes_to_pem(raw):
+    """把下载到的 CRL 统一转 PEM（DER/PEM 自动识别）
+
+    与 check_crl.py 的校验口径一致：即便是 PEM 也解析一遍，挡住 HTML 错误页之类的假数据。
+    解析失败会抛异常，由调用方决定是否换下一个 CDP。
+    """
+    if raw.lstrip().startswith(b"-----BEGIN"):
+        x509.load_pem_x509_crl(raw)
+        return raw
+    return x509.load_der_x509_crl(raw).public_bytes(serialization.Encoding.PEM)
+
+
+def fetch_crl_cached(cert_path, out_pem, cache_dir, timeout=15):
+    """按证书 CDP 下载 CRL：同一 URL 只下一次（缓存到 cache_dir），再复制到 out_pem
+
+    返回 (是否成功, 命中的 URL 或 None, 是否来自缓存)。
+    多个 CDP 分发点逐个尝试，全部失败返回 False（调用方跳过 CRL 侧）。
+    每张证书仍各有自己的 crl.pem（证据文件布局不变），但网络下载量降到
+    「唯一 CDP URL 数」而不是「证书数」。
+    """
+    try:
+        with open(cert_path, "rb") as f:
+            cert = load_cert(f.read())
+        urls = get_cdp_urls(cert)
+    except Exception as e:
+        print(f"  读取证书 / 解析 CDP 失败: {type(e).__name__}: {e}")
+        _CRL_STATS["fail"] += 1
+        return False, None, False
+
+    if not urls:
+        print("  该证书没有 CDP 扩展（或其中没有 http/https 分发点），跳过 CRL 侧")
+        _CRL_STATS["fail"] += 1
+        return False, None, False
+
+    for url in urls:
+        cached = crl_cache_file(cache_dir, url)
+        if os.path.isfile(cached):
+            shutil.copyfile(cached, out_pem)
+            _CRL_STATS["hit"] += 1
+            return True, url, True
+        print(f"  下载 CRL: {url}")
+        try:
+            pem = crl_bytes_to_pem(fetch_url(url, timeout=timeout))
+        except Exception as e:
+            print(f"  下载 / 解析失败: {type(e).__name__}: {e}")
+            continue
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(cached, "wb") as f:
+            f.write(pem)
+        shutil.copyfile(cached, out_pem)
+        _CRL_STATS["download"] += 1
+        return True, url, False
+
+    print("  所有 CDP 分发点都失败，跳过 CRL 侧")
+    _CRL_STATS["fail"] += 1
+    return False, None, False
 
 
 def lint_one(obj_path, out_json, out_csv):
@@ -212,12 +305,13 @@ def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
     ok_all &= rc == 0
     append_summary("证书侧", "cert.csv")
 
-    # ---------- [2/3] CRL 侧：从 CDP 下载 CRL → 跑全部 CRL 类规则 ----------
-    print(f"\n===== [2/3] CRL 侧（从 CDP 下载 CRL → 全部 CRL 类规则，联网） =====")
+    # ---------- [2/3] CRL 侧：按 CDP URL 去重下载 → 跑全部 CRL 类规则 ----------
+    print(f"\n===== [2/3] CRL 侧（按 CDP URL 去重下载 → 全部 CRL 类规则，联网） =====")
     crl_pem = os.path.join(out_dir, "crl.pem")
-    rc = subprocess.call([sys.executable, CHECK_CRL, cert_path,
-                          "--out", crl_pem, "--timeout", str(timeout)])
-    if rc == 0 and os.path.isfile(crl_pem):
+    ok_crl, crl_url, from_cache = fetch_crl_cached(
+        cert_path, crl_pem, os.path.join(summary_dir, _CRL_CACHE_DIR), timeout)
+    if ok_crl:
+        print(f"  CRL 来源: {'缓存命中' if from_cache else '本次下载'}  {crl_url}")
         rc, itype = lint_one(crl_pem,
                              os.path.join(out_dir, "crl.json"),
                              os.path.join(out_dir, "crl.csv"))
@@ -226,8 +320,8 @@ def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
         record["crl_pem"] = "crl.pem"
         append_summary("CRL 侧", "crl.csv")
     else:
-        print("CRL 下载/转换失败，跳过 CRL 规则（不影响其他步骤）")
-        rows.append(("CRL 侧", "跳过", rc))
+        print("CRL 未取得，跳过 CRL 规则（不影响其他步骤）")
+        rows.append(("CRL 侧", "跳过", 1))
 
     # ---------- [3/3] OCSP 侧：查询并保存原始响应 → 跑全部 OCSP 类规则 ----------
     print(f"\n===== [3/3] OCSP 侧（查 OCSP 并存原始响应 → 全部 OCSP 类规则，联网） =====")
@@ -282,12 +376,19 @@ def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
     return ok_all, record
 
 
+def print_crl_stats():
+    """打印 CRL 去重缓存统计（每张证书一次计数：实际下载 / 命中缓存 / 无 CRL 可下）"""
+    print(f"CRL 去重统计: 实际下载 {_CRL_STATS['download']} 次，"
+          f"命中缓存 {_CRL_STATS['hit']} 次，"
+          f"无 CRL 可下 {_CRL_STATS['fail']} 次")
+
+
 def run_target(target, out_root=None, timeout=15, detail=False):
     """依赖检查 + 单个/批量分发（target 已展开 ~）"""
     if not os.path.exists(target):
         err(f"路径不存在 -> {target}")
         sys.exit(1)
-    for s in (ZLINT_BIN, CHECK_CRL, CHECK_OCSP):
+    for s in (ZLINT_BIN, CHECK_OCSP):
         if not os.path.isfile(s):
             err(f"找不到 {s}")
             sys.exit(1)
@@ -299,8 +400,11 @@ def run_target(target, out_root=None, timeout=15, detail=False):
         p = os.path.join(summary_dir, f)
         if os.path.isfile(p):
             os.remove(p)
+    _CRL_STATS.update(download=0, hit=0, fail=0)
     print(f"三张汇总表重建于: {summary_dir}/"
           f"（{', '.join(_SUMMARY_FILE.values())}；另有 {_INDEX_FILE} 证书索引）")
+    print(f"CRL 缓存目录: {os.path.join(summary_dir, _CRL_CACHE_DIR)}/"
+          f"（同一 CDP URL 只下载一次，后续证书直接复制缓存）")
 
     if os.path.isdir(target):
         # ---------- 批量：遍历目录下所有证书 ----------
@@ -333,6 +437,7 @@ def run_target(target, out_root=None, timeout=15, detail=False):
         for c in fail:
             print(f"  [失败] {c}")
         print(f"证书索引: {index_path}（{len(records)} 行）")
+        print_crl_stats()
         sys.exit(0 if ok_all else 1)
     else:
         # ---------- 单个证书 ----------
@@ -340,6 +445,7 @@ def run_target(target, out_root=None, timeout=15, detail=False):
         index_path = os.path.join(summary_dir, _INDEX_FILE)
         write_index(index_path, [rec])
         print(f"证书索引: {index_path}（1 行）")
+        print_crl_stats()
         sys.exit(0 if ok else 1)
 
 

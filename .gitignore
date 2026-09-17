@@ -20,6 +20,9 @@ __pycache__/
 /resp.der
 /crl_sourcedata/
 
+# run_cert_crl_ocsp.py 的 CRL 去重缓存（下载产物，不入库）
+_crl_cache/
+
 # 证书样例目录
 /certs/
 
