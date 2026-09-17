@@ -17,11 +17,16 @@ CRL / OCSP 步骤联网失败（无 CDP / 无 OCSP 地址 / 网络不通 / 下�
     python3 run_cert_crl_ocsp.py <证书路径|证书目录> [输出目录] [--timeout 秒] [--detail]
     python3 run_cert_crl_ocsp.py                                # 无参数 → 交互模式
 
-输出（默认"精简模式"：批量多张证书也只留三张按侧汇总表 + 每证书的证据文件）:
+输出（默认"精简模式"：批量多张证书也只留三张按侧汇总表 + 证书索引 + 每证书的证据文件）:
     输出根/                              （默认 ./results；每张证书再建 <证书名>/ 子目录）
     ├── ca_summary.csv        全部证书的证书侧汇总（每行首列 cert 为证书名）
     ├── crl_summary.csv       全部证书的 CRL 侧汇总
     ├── ocsp_summary.csv      全部证书的 OCSP 侧汇总
+    ├── index.csv             证书索引；三张汇总表只用"证书名"标识证书
+    │                         （zlint 的输出里没有指纹），需要指纹/有效期
+    │                         对账时用本表按 cert 列 join：
+    │                         cert, fingerprint_sha256, not_before, not_after,
+    │                         path, crl_pem, resp_der
     └── <证书名>/             每证书目录，只留联网证据（zlint 中间 JSON/CSV 已删）
         ├── crl.pem           从 CDP 下载的 CRL（PEM，有则）
         └── resp.der          原始 OCSP 响应（有则）
@@ -58,6 +63,14 @@ CERT_EXTS = (".pem", ".crt", ".cer", ".der", ".cert")
 _SIDE_FILE = {"证书侧": "cert", "CRL 侧": "crl", "OCSP 侧": "ocsp"}
 _SUMMARY_FILE = {"证书侧": "ca_summary.csv", "CRL 侧": "crl_summary.csv",
                  "OCSP 侧": "ocsp_summary.csv"}
+_INDEX_FILE = "index.csv"        # 证书索引表（汇总表只有证书名，指纹/有效期在这张表里）
+
+# 复用 run_ocsp_batch 的 cert_meta()：指纹与有效期用同一套解析口径，
+# 保证 index.csv 的 fingerprint_sha256 与 run_ocsp_batch.py 输出的完全一致
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+from run_ocsp_batch import cert_meta  # noqa: E402
+
 
 
 def err(msg):
@@ -82,6 +95,22 @@ def merge_csv(src_csv, summary_csv, prefix):
         for r in data:
             wr.writerow([prefix] + r)
     return len(data)
+
+
+def write_index(path, records):
+    """写证书索引表：cert / fingerprint_sha256 / not_before / not_after /
+    path / crl_pem / resp_der。
+
+    三张 *_summary.csv 只用"证书名"标识证书（zlint 的输出里没有指纹），
+    同名不同版本或需要与台账对账时，用本表按 cert 列 join 出指纹与有效期。
+    crl_pem / resp_der 为对应证据文件名，没有则留空。"""
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:  # utf-8-sig 方便 Excel
+        wr = csv.writer(f)
+        wr.writerow(["cert", "fingerprint_sha256", "not_before", "not_after",
+                     "path", "crl_pem", "resp_der"])
+        for r in records:
+            wr.writerow([r["cert"], r["fingerprint_sha256"], r["not_before"],
+                         r["not_after"], r["path"], r["crl_pem"], r["resp_der"]])
 
 
 def lint_one(obj_path, out_json, out_csv):
@@ -153,11 +182,16 @@ def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
     默认精简模式（只留 *_summary.csv + crl.pem / resp.der 证据文件）；
     detail=True 保留每张证书的全部中间产物（json/csv/pem/der）。
     stem 为显示名/子目录名（默认取文件名去扩展名；批量时由 dedupe_stems 去重）。
-    返回是否全部 OK"""
+    返回 (是否全部 OK, 索引表记录 dict)"""
     stem = stem or os.path.splitext(os.path.basename(cert_path))[0]
     summary_dir = out_root or os.path.join(PROJECT_ROOT, "results")
     out_dir = os.path.join(summary_dir, stem)   # 每证书一个子目录
     os.makedirs(out_dir, exist_ok=True)
+
+    # 索引表用的一行：指纹（无冒号）+ 有效期，解析失败则留空
+    fpr, nb, na = cert_meta(cert_path)
+    record = {"cert": stem, "fingerprint_sha256": fpr, "not_before": nb,
+              "not_after": na, "path": cert_path, "crl_pem": "", "resp_der": ""}
 
     rows = []   # (步骤, tag, exit_code)
     ok_all = True
@@ -189,6 +223,7 @@ def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
                              os.path.join(out_dir, "crl.csv"))
         rows.append(("CRL 侧", itype, rc))
         ok_all &= rc == 0
+        record["crl_pem"] = "crl.pem"
         append_summary("CRL 侧", "crl.csv")
     else:
         print("CRL 下载/转换失败，跳过 CRL 规则（不影响其他步骤）")
@@ -206,6 +241,7 @@ def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
                              os.path.join(out_dir, "ocsp.csv"))
         rows.append(("OCSP 侧", itype, rc))
         ok_all &= rc == 0
+        record["resp_der"] = "resp.der"
         append_summary("OCSP 侧", "ocsp.csv")
     else:
         print("OCSP 查询失败，跳过 OCSP 规则（不影响其他步骤）")
@@ -214,6 +250,7 @@ def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
     # ---------- 汇总统计（读 json，须在精简清理之前） ----------
     print("\n================ 汇总 ================")
     print(f"证书: {cert_path}")
+    print(f"SHA-256: {fpr or '(解析失败)'}")
     print(f"输出: {out_dir}/")
     print("----------------------------------------")
     for tag, itype, rc in rows:
@@ -242,7 +279,7 @@ def run_one(cert_path, out_root=None, timeout=15, detail=False, stem=None):
         if os.path.isdir(out_dir) and not os.listdir(out_dir):
             os.rmdir(out_dir)
             print(f"精简模式: 删除空目录 {out_dir}")
-    return ok_all
+    return ok_all, record
 
 
 def run_target(target, out_root=None, timeout=15, detail=False):
@@ -255,15 +292,15 @@ def run_target(target, out_root=None, timeout=15, detail=False):
             err(f"找不到 {s}")
             sys.exit(1)
 
-    # 每次运行重建三张汇总表（避免重跑同一证书时重复追加）
+    # 每次运行重建三张汇总表 + 证书索引（避免重跑同一证书时重复追加）
     summary_dir = out_root or os.path.join(PROJECT_ROOT, "results")
     os.makedirs(summary_dir, exist_ok=True)
-    for f in _SUMMARY_FILE.values():
+    for f in list(_SUMMARY_FILE.values()) + [_INDEX_FILE]:
         p = os.path.join(summary_dir, f)
         if os.path.isfile(p):
             os.remove(p)
     print(f"三张汇总表重建于: {summary_dir}/"
-          f"（{', '.join(_SUMMARY_FILE.values())}）")
+          f"（{', '.join(_SUMMARY_FILE.values())}；另有 {_INDEX_FILE} 证书索引）")
 
     if os.path.isdir(target):
         # ---------- 批量：遍历目录下所有证书 ----------
@@ -279,23 +316,30 @@ def run_target(target, out_root=None, timeout=15, detail=False):
                if n != os.path.splitext(os.path.basename(p))[0]}
         if dup:
             print("检测到重名证书，已加父目录前缀区分: " + ", ".join(sorted(dup)))
-        ok_all, ok, fail = True, 0, []
+        ok_all, ok, fail, records = True, 0, [], []
         for i, c in enumerate(certs, 1):
             print(f"\n{'='*60}\n[{i}/{len(certs)}] {c}\n{'='*60}")
-            ok_one = run_one(c, summary_dir, timeout, detail, stem=names[c])
+            ok_one, rec = run_one(c, summary_dir, timeout, detail, stem=names[c])
+            records.append(rec)
             ok_all &= ok_one
             if ok_one:
                 ok += 1
             else:
                 fail.append(c)
+        index_path = os.path.join(summary_dir, _INDEX_FILE)
+        write_index(index_path, records)
         print(f"\n============ 批量完成 ============")
         print(f"成功 {ok}/{len(certs)}，失败 {len(fail)} 个")
         for c in fail:
             print(f"  [失败] {c}")
+        print(f"证书索引: {index_path}（{len(records)} 行）")
         sys.exit(0 if ok_all else 1)
     else:
         # ---------- 单个证书 ----------
-        ok = run_one(target, summary_dir, timeout, detail)
+        ok, rec = run_one(target, summary_dir, timeout, detail)
+        index_path = os.path.join(summary_dir, _INDEX_FILE)
+        write_index(index_path, [rec])
+        print(f"证书索引: {index_path}（1 行）")
         sys.exit(0 if ok else 1)
 
 
