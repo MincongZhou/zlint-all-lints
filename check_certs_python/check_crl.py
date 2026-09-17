@@ -137,9 +137,23 @@ def main():
     i = 0
     while i < len(args):
         if args[i] == "--timeout":
-            timeout = int(args[i + 1])
+            if i + 1 >= len(args):
+                print("错误: --timeout 缺少秒数，如 --timeout 15", file=sys.stderr)
+                sys.exit(2)
+            try:
+                timeout = int(args[i + 1])
+            except ValueError:
+                print(f"错误: --timeout 需要整数秒数，收到: {args[i + 1]!r}",
+                      file=sys.stderr)
+                sys.exit(2)
+            if timeout <= 0:
+                print(f"错误: --timeout 必须为正整数，收到: {timeout}", file=sys.stderr)
+                sys.exit(2)
             i += 2
         elif args[i] == "--out":
+            if i + 1 >= len(args):
+                print("错误: --out 缺少输出文件名", file=sys.stderr)
+                sys.exit(2)
             out_path = args[i + 1]
             i += 2
         else:

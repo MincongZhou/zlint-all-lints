@@ -42,7 +42,7 @@ wide 模式的扩展列名形如 ext.SUBJECT_ALTERNATIVE_NAME.critical /
 .san_count / .names，用 OID 名而非位置下标，保证同一列在所有证书中语义一致；
 多值（SAN 域名、SCT 列表等）合并进同一单元格（'; ' 分隔），不按位置拆列，
 避免列爆炸与跨证书语义错位；未知 OID 退回完整点分串作列名。
-目录递归查找 .pem/.crt/.cer/.der；非证书文件（如 CRL）自动跳过并告警。
+目录递归查找 .pem/.crt/.cer/.der/.cert；非证书文件（如 CRL）自动跳过并告警。
 CSV 统一 UTF-8 with BOM（Excel 双击直接打开不乱码）。
 
 未指定 --der 时默认按 PEM 解析，失败自动回退 DER。
@@ -940,8 +940,10 @@ def write_csv(path, rows, fieldnames):
 
 
 def expand_inputs(paths):
-    """展开输入：目录递归查 .pem/.crt/.cer/.der，文件直接收录；结果排序去重"""
-    exts = (".pem", ".crt", ".cer", ".der")
+    """展开输入：目录递归查 .pem/.crt/.cer/.der/.cert，文件直接收录；结果排序去重"""
+    # 扩展名口径与 run_cert_crl_ocsp.py / run_ocsp_batch.py 的 CERT_EXTS 保持一致，
+    # 否则同一次 run_all.sh 里 .cert 会出现在 ①④ 却从 ② 的宽表中消失
+    exts = (".pem", ".crt", ".cer", ".der", ".cert")
     files = []
     for p in paths:
         p = os.path.expanduser(p)
@@ -970,7 +972,7 @@ def run_batch(paths, der, csv_file, csv_mode=None):
     """
     files = expand_inputs(paths)
     if not files:
-        print("错误: 未找到任何证书文件（支持 .pem/.crt/.cer/.der）", file=sys.stderr)
+        print("错误: 未找到任何证书文件（支持 .pem/.crt/.cer/.der/.cert）", file=sys.stderr)
         sys.exit(1)
 
     if csv_mode not in (None, "fields", "summary", "wide"):

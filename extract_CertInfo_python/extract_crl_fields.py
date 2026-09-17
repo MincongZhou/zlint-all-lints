@@ -7,6 +7,10 @@ extract_crl_fields.py —— CRL 吊销清单 + 全字段提取（对齐 extract
     python3 extract_crl_fields.py crl.pem                     # 终端列出序列号（hex + dec）
     python3 extract_crl_fields.py crls/                       # 目录批量
     python3 extract_crl_fields.py crls/ --csv revoked.csv     # 汇总导出（含吊销时间/原因）
+    python3 extract_crl_fields.py --paths-from list.txt ...   # 从列表文件逐行读输入路径
+                                                              # （- 表示 stdin；run_all.sh
+                                                              # 传上万份 crl.pem 时用它避开
+                                                              # 命令行长度 ARG_MAX 限制）
 
 二、全字段提取（CRL 版 extract_cert_fields）
     python3 extract_crl_fields.py crl.pem --full              # 终端打印全部字段
@@ -702,7 +706,10 @@ def load_issuer_cert(path):
 
 def run_batch(paths, csv_file=None, csv_mode="revoked", issuer_cert=None,
               as_json=False, full=False, no_ext=False):
-    """解析并输出。csv_mode: revoked / entries / wide / fields"""
+    """解析并输出。csv_mode: revoked / entries / wide / fields
+
+    写 CSV 时边解析边累积结果行，不再整份保留 parse 结果（见下方循环注释）。
+    """
     files = expand_inputs(paths, exclude=[csv_file] if csv_file else [])
     if not files:
         print(f"错误: 未找到任何 CRL 文件（支持 {'/'.join(CRL_EXTS)}）",
@@ -715,15 +722,32 @@ def run_batch(paths, csv_file=None, csv_mode="revoked", issuer_cert=None,
 
     issuer_pub = issuer_cert.public_key() if issuer_cert is not None else None
     issuer_subject = issuer_cert.subject if issuer_cert is not None else None
-    parsed_list, ok, fail = [], 0, 0
+
+    # 写 CSV 时边解析边累积结果行，不再整份保留 parse 结果：上万份 CRL（每份可能
+    # 上万条吊销记录）时，把所有 parsed 常驻内存会吃掉几 GB。只有终端 / JSON 输出
+    # （未指定 --csv）才需要保留解析结果。
+    parsed_list, csv_rows, ent_rows = [], [], []
+    ok, fail = 0, 0
     for fp in files:
         try:
             crl, fmt = load_crl(fp)
-            parsed_list.append(parse_crl(crl, fp, fmt, issuer_pub, issuer_subject))
+            parsed = parse_crl(crl, fp, fmt, issuer_pub, issuer_subject)
             ok += 1
         except Exception as e:
             fail += 1
             print(f"[跳过] {fp}: {e}", file=sys.stderr)
+            continue
+
+        if not csv_file:
+            parsed_list.append(parsed)
+        elif csv_mode == "wide":
+            csv_rows.append(wide_row(parsed, include_ext=not no_ext))
+            ent_rows.extend(entry_rows(parsed, full=True))
+        elif csv_mode == "fields":
+            csv_rows.extend({"file": parsed["file"], "field": field, "value": value}
+                            for field, value in flatten(parsed))
+        else:                       # revoked（默认）/ entries
+            csv_rows.extend(entry_rows(parsed, full=(csv_mode == "entries")))
 
     tail = f"成功 {ok} 个" + (f"，失败 {fail} 个" if fail else "")
 
@@ -752,30 +776,22 @@ def run_batch(paths, csv_file=None, csv_mode="revoked", issuer_cert=None,
         return
 
     if csv_file and csv_mode == "wide":
-        rows = [wide_row(p, include_ext=not no_ext) for p in parsed_list]
-        ext_cols = sorted({k for r in rows for k in r if k.startswith("ext.")})
-        write_csv(csv_file, rows, WIDE_BASE_FIELDS + ext_cols)
-        ent = [r for p in parsed_list for r in entry_rows(p, full=True)]
+        ext_cols = sorted({k for r in csv_rows for k in r if k.startswith("ext.")})
+        write_csv(csv_file, csv_rows, WIDE_BASE_FIELDS + ext_cols)
         ent_path = _sibling_path(csv_file, "_entries")
-        write_csv(ent_path, ent, ENTRY_FULL_FIELDS)
-        print(f"已写入: {csv_file}（CRL 宽表，{tail}，{len(rows)} 行 × "
+        write_csv(ent_path, ent_rows, ENTRY_FULL_FIELDS)
+        print(f"已写入: {csv_file}（CRL 宽表，{tail}，{len(csv_rows)} 行 × "
               f"{len(WIDE_BASE_FIELDS) + len(ext_cols)} 列）", file=sys.stderr)
-        print(f"已写入: {ent_path}（吊销条目全字段，{len(ent)} 行）",
+        print(f"已写入: {ent_path}（吊销条目全字段，{len(ent_rows)} 行）",
               file=sys.stderr)
     elif csv_file and csv_mode == "fields":
-        rows = []
-        for p in parsed_list:
-            for field, value in flatten(p):
-                rows.append({"file": p["file"], "field": field, "value": value})
-        write_csv(csv_file, rows, ["file", "field", "value"])
-        print(f"已写入: {csv_file}（模式 fields，{tail}，共 {len(rows)} 行）",
+        write_csv(csv_file, csv_rows, ["file", "field", "value"])
+        print(f"已写入: {csv_file}（模式 fields，{tail}，共 {len(csv_rows)} 行）",
               file=sys.stderr)
     elif csv_file:              # revoked（默认，兼容旧版） / entries
-        full_entries = csv_mode == "entries"
-        rows = [r for p in parsed_list for r in entry_rows(p, full=full_entries)]
-        fields = ENTRY_FULL_FIELDS if full_entries else ENTRY_BRIEF_FIELDS
-        write_csv(csv_file, rows, fields)
-        print(f"已写入: {csv_file}（模式 {csv_mode}，{tail}，共 {len(rows)} 行）",
+        fields = ENTRY_FULL_FIELDS if csv_mode == "entries" else ENTRY_BRIEF_FIELDS
+        write_csv(csv_file, csv_rows, fields)
+        print(f"已写入: {csv_file}（模式 {csv_mode}，{tail}，共 {len(csv_rows)} 行）",
               file=sys.stderr)
 
     # 多文件且未指定 CSV 模式时，终端也给一份简要清单（保持旧观感）
@@ -836,14 +852,60 @@ def interactive():
               as_json=(way == "json"), full=(way == "full"), no_ext=no_ext)
 
 
-def _opt_value(args, flag):
-    """取 `--flag 值`；无 flag 返回 None，缺值返回 ''"""
-    if flag not in args:
-        return None
-    i = args.index(flag)
-    if i + 1 < len(args) and not args[i + 1].startswith("--"):
-        return args[i + 1]
-    return ""
+# 需要取值的选项（其余 --xxx 一律视为开关）
+_VALUE_OPTS = ("--csv", "--csv-mode", "--issuer", "--paths-from")
+
+
+def read_paths_from(src):
+    """从列表文件（src == '-' 表示 stdin）逐行读输入路径。
+
+    供 run_all.sh 这类调用方使用：把上万份 crl.pem 直接塞进 argv 会触碰 ARG_MAX
+    （报 "Argument list too long"），写一个列表文件更稳。空行与 # 开头的注释行忽略。
+    """
+    if src == "-":
+        stream, closer = sys.stdin, None
+    else:
+        try:
+            stream = open(os.path.expanduser(src), encoding="utf-8")
+        except OSError as e:
+            print(f"错误: 无法读取路径列表 {src}: {e}", file=sys.stderr)
+            sys.exit(1)
+        closer = stream
+    out = []
+    try:
+        for line in stream:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                out.append(line)
+    finally:
+        if closer is not None:
+            closer.close()
+    return out
+
+
+def parse_args(args):
+    """顺序扫描 argv → (paths, opts, flags)。
+
+    按位置逐个消费选项值，不用"拿值反查下标"的老写法 —— 后者在输入路径/目录名
+    恰好等于某个选项值（如 revoked、wide）时会把路径误吞掉。
+    """
+    paths, opts, flags = [], {}, set()
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in _VALUE_OPTS:
+            if i + 1 >= len(args):
+                print(f"错误: {a} 缺少值", file=sys.stderr)
+                sys.exit(1)
+            opts[a] = args[i + 1]
+            i += 2
+        elif a.startswith("--"):
+            flags.add(a)
+            i += 1
+        else:
+            paths.append(a)
+            i += 1
+    return paths, opts, flags
 
 
 def main():
@@ -856,15 +918,22 @@ def main():
         print(__doc__)
         return
 
-    csv_file = _opt_value(args, "--csv")
-    csv_mode = _opt_value(args, "--csv-mode") or "revoked"
-    issuer_path = _opt_value(args, "--issuer")
-    as_json = "--json" in args
-    full = "--full" in args
-    no_ext = "--no-ext-columns" in args
+    paths, opts, flags = parse_args(args)
+    csv_file = opts.get("--csv")
+    csv_mode = opts.get("--csv-mode") or "revoked"
+    issuer_path = opts.get("--issuer")
+    paths_from = opts.get("--paths-from")
+    as_json = "--json" in flags
+    full = "--full" in flags
+    no_ext = "--no-ext-columns" in flags
 
-    consumed = {csv_file, csv_mode, issuer_path, None}
-    paths = [a for a in args if not a.startswith("--") and a not in consumed]
+    if paths_from is not None:
+        if not paths_from:
+            print("错误: --paths-from 需要列表文件名（或 - 表示 stdin）",
+                  file=sys.stderr)
+            sys.exit(1)
+        paths += read_paths_from(paths_from)
+
     if not paths:
         print(__doc__)
         sys.exit(1)
