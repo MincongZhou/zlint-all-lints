@@ -26,12 +26,34 @@ crt.sh 的 SQL 接口做不了这件事，必须 HTTP + SQL 配合：
 
   3. **encode(...,'base64') 每 76 字符插换行**，CSV 里是多行字段，用 csv 模块解析
 
+============================================================ 两种筛选口径
+  --window-mode issued （默认）  证书**签发时间**落在窗口内
+        ws <= not_before <= we
+        -> certs/ct_log_certs
+
+  --window-mode valid            证书**有效期与窗口有交集**
+        not_before <= we  且  not_after >= ws
+        即「窗口开始时已签发、且到窗口结束前还没过期」的证书，
+        比 issued 多出一批「窗口前签发、有效期跨入窗口」的跨期证书。
+        翻页需要往回翻到窗口起点之前（有效期最长见过 1300 天），
+        截止日期由 --nb-floor 控制，默认 = 窗口起点 - 1460 天。
+        -> certs/ct_log_certs_overlap
+
 ============================================================ 用法
+  # 口径一：窗口内签发（原行为）
   python3 crtsh_verify/build_ct_log_certs.py \
       --window-start 2025-08-01 --window-end 2026-07-31 \
       --ca-pattern CFCA \
       --local-dir "certs/CFCA全部证书/非国密证书" \
       --out-dir certs/ct_log_certs
+
+  # 口径二：有效期与窗口有交集
+  python3 crtsh_verify/build_ct_log_certs.py --window-mode valid \
+      --window-start 2025-08-01 --window-end 2026-07-31 \
+      --ca-pattern CFCA \
+      --local-dir "certs/CFCA全部证书/非国密证书" \
+      --out-dir certs/ct_log_certs_overlap \
+      --work-dir /tmp/ct_log_overlap
 
 产出：
   <out-dir>/*.der                     正式证书，文件名 序号_CA_序列号.der
@@ -116,9 +138,16 @@ def discover_cas(pattern, work):
 
 
 # ------------------------------------------------------------------ ② 列表
-def list_window(ca_id, ws, we):
+def list_window(ca_id, ws, we, mode="issued", nb_floor=None):
+    """列表严格按 Not Before 倒序，所以可以边翻边判断何时停。
+
+    mode='issued'：留 ws <= not_before <= we，翻到 not_before < ws 即停
+    mode='valid' ：留 not_before <= we 且 not_after >= ws，
+                   因为要往回找有效期跨入窗口的证书，翻到 not_before < nb_floor 才停
+    """
+    stop_at = ws if mode == "issued" else (nb_floor or ws)
     rows, page = [], 1
-    while page <= 60:
+    while page <= 80:
         html = curl(f"https://crt.sh/?identity=%25&iCAID={ca_id}&p={page}&n={PAGE}")
         if html is None:
             break
@@ -126,11 +155,12 @@ def list_window(ca_id, ws, we):
         if not got:
             break
         for cid, nb, na, subj in got:
-            nb = nb.strip()
-            if ws <= nb <= we:
-                rows.append((cid, nb, na.strip(), re.sub(r"\s+", " ", subj).strip()))
-        oldest = min(x[1].strip() for x in got)
-        if oldest < ws or len(got) < PAGE:
+            nb, na = nb.strip(), na.strip()
+            hit = (ws <= nb <= we) if mode == "issued" else (nb <= we and na >= ws)
+            if hit:
+                rows.append((cid, nb, na, re.sub(r"\s+", " ", subj).strip()))
+        oldest = min(x[1] for x in got)
+        if oldest < stop_at or len(got) < PAGE:
             break
         page += 1
         time.sleep(1)
@@ -192,6 +222,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--window-start", default="2025-08-01")
     ap.add_argument("--window-end", default="2026-07-31")
+    ap.add_argument("--window-mode", choices=["issued", "valid"], default="issued",
+                    help="issued=签发时间落在窗口内（默认）；"
+                         "valid=有效期与窗口有交集（not_before<=窗口末 且 not_after>=窗口起）")
+    ap.add_argument("--nb-floor", default=None,
+                    help="valid 模式下列表往回翻的截止签发日期；"
+                         "默认 = 窗口起点 - 1460 天（本地见过最长有效期 1300 天）")
     ap.add_argument("--ca-pattern", default="CFCA")
     ap.add_argument("--local-dir", action="append", default=None,
                     help="本地正式证书目录（可重复指定）。crt.sh 对多数条目只给 precert，"
@@ -208,10 +244,20 @@ def main():
     cas = discover_cas(a.ca_pattern, a.work_dir)
     print(f"   匹配 {len(cas)} 个")
 
-    print(f"② 逐 CA 拉 {a.window_start} ~ {a.window_end} 列表…")
+    nb_floor = a.nb_floor
+    if a.window_mode == "valid" and not nb_floor:
+        from datetime import date, timedelta
+        nb_floor = (date.fromisoformat(a.window_start) - timedelta(days=1460)).isoformat()
+
+    if a.window_mode == "issued":
+        print(f"② 逐 CA 拉「{a.window_start} ~ {a.window_end} 签发」列表…")
+    else:
+        print(f"② 逐 CA 拉「有效期与 {a.window_start} ~ {a.window_end} 有交集」列表"
+              f"（not_before <= {a.window_end} 且 not_after >= {a.window_start}，"
+              f"往回翻到 {nb_floor}）…")
     listing = []
     for c in cas:
-        rs = list_window(c["id"], a.window_start, a.window_end)
+        rs = list_window(c["id"], a.window_start, a.window_end, a.window_mode, nb_floor)
         if rs:
             print(f"   {c['id']:>8s} {c['name'].split('CN=')[-1][:36]:38s} {len(rs):5d} 行")
         for cid, nb, na, s in rs:
