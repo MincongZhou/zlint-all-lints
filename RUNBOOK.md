@@ -159,10 +159,13 @@ responder 回 `UNAUTHORIZED`，看起来像"服务端拒绝"，其实只是传�
 很多 CA（如 CFCA Identity 体系）的 AIA 只给 OCSP 地址、不给 `CA Issuers`，
 这类证书必须靠前两级，否则只能得到 `ERROR: 加载签发者证书失败`。
 
-产物 `/tmp/ocsp_batch.csv`，四列 `cert,fingerprint_sha256,status,detail`
+产物 `/tmp/ocsp_batch.csv`，六列
+`cert,fingerprint_sha256,not_before,not_after,status,detail`
 （`fingerprint_sha256` = 证书 DER 编码的 SHA-256 指纹，大写十六进制，与
-`openssl x509 -fingerprint -sha256` 一致；证书改名 / 重名 / 多版本链同名文件都能唯一定位，
-且解析失败或查询失败时依然有值，便于与台账对账）：
+`openssl x509 -fingerprint -sha256` 一致；`not_before` / `not_after` = 证书有效期，
+ISO 8601 UTC，与 `openssl x509 -noout -dates` 一致。这几列都从证书本地解析，
+证书改名 / 重名 / 多版本链同名文件都能唯一定位，且解析失败或查询失败时依然有值，
+便于与台账对账）：
 
 | status | 含义 |
 |---|---|

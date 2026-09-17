@@ -23,6 +23,9 @@ __pycache__/
 # 证书样例目录
 /certs/
 
+# 本地签发者证书库（OCSP 构造 CertID 用，本地收集，不入库）
+/issuers/
+
 # 编辑器 / IDE
 .vscode/
 

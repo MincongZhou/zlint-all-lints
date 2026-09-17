@@ -6,8 +6,10 @@ run_ocsp_batch.py —— 批量跑 check_ocsp.py，对每个证书联网查询 O
 逐张调用 check_certs_python/check_ocsp.py --status 查询，逐张打印结果；
 每张证书另附 DER 编码的 SHA-256 指纹（与 openssl -fingerprint -sha256 一致，
 证书改名 / 重名 / 多版本链同名文件都能唯一对账）；
-可选 --csv 输出一张汇总表（cert / fingerprint_sha256 / status / detail 四列），
-方便 Excel 打开。
+可选 --csv 输出一张汇总表（cert / fingerprint_sha256 / not_before / not_after /
+status / detail 六列），方便 Excel 打开。
+其中 not_before / not_after 为证书有效期，从证书本地解析（ISO 8601 UTC，
+与 openssl x509 -noout -dates 一致），解析失败或查询失败时依然有值。
 
 签发者证书（OCSP 的 CertID 必须用它构造）来源，按优先级:
     1. --issuer-dir 指定的目录（可多次）
@@ -43,6 +45,7 @@ import shlex
 import subprocess
 import sys
 from collections import Counter
+from datetime import timezone
 
 from cryptography.hazmat.primitives import hashes
 
@@ -77,15 +80,35 @@ def collect_certs(paths):
     return sorted(set(certs))
 
 
-def cert_sha256(cert_path, der=False):
-    """证书 DER 编码的 SHA-256 指纹，形如 AA:BB:CC:...（大写十六进制，
-    与 openssl x509 -fingerprint -sha256 的输出一致）。解析失败返回空串。
-    指纹用于对账：证书改名、同名不同版本都能唯一标识，且不受查询成败影响。"""
+def iso_utc(dt):
+    """datetime → ISO 8601 UTC 字符串（如 2026-06-12T07:18:50+00:00）。
+    cryptography < 42 返回的是 naive UTC，这里按 UTC 补上时区。"""
+    if dt is None:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def cert_meta(cert_path, der=False):
+    """读证书，返回 (指纹, not_before, not_after)。解析失败三者都返回空串。
+
+    指纹 = DER 编码的 SHA-256，形如 AA:BB:CC:...（大写十六进制，与
+    openssl x509 -fingerprint -sha256 的输出一致），用于对账：证书改名、
+    同名不同版本都能唯一标识，且不受查询成败影响。
+    not_before / not_after = 证书有效期，ISO 8601 UTC（与 openssl -dates 一致）。
+    """
     try:
         with open(cert_path, "rb") as f:
-            return load_cert(f.read(), der).fingerprint(hashes.SHA256()).hex(":").upper()
+            cert = load_cert(f.read(), der)
     except Exception:
-        return ""
+        return "", "", ""
+    fpr = cert.fingerprint(hashes.SHA256()).hex(":").upper()
+    nb = getattr(cert, "not_valid_before_utc", None)
+    na = getattr(cert, "not_valid_after_utc", None)
+    if nb is None or na is None:        # cryptography < 42 无 *_utc 属性，退回旧属性
+        nb, na = cert.not_valid_before, cert.not_valid_after
+    return fpr, iso_utc(nb), iso_utc(na)
 
 
 def resolve_issuer(cert_path, index, der=False):
@@ -149,9 +172,10 @@ def write_csv(path, results):
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8-sig") as f:  # utf-8-sig 方便 Excel
         wr = csv.writer(f)
-        wr.writerow(["cert", "fingerprint_sha256", "status", "detail"])
-        for cert, fpr, status, detail in results:
-            wr.writerow([cert, fpr, status, detail])
+        wr.writerow(["cert", "fingerprint_sha256", "not_before", "not_after",
+                     "status", "detail"])
+        for cert, fpr, nb, na, status, detail in results:
+            wr.writerow([cert, fpr, nb, na, status, detail])
 
 
 def batch(paths, csv_path=None, timeout=15, der=False, sha256=False,
@@ -175,20 +199,20 @@ def batch(paths, csv_path=None, timeout=15, der=False, sha256=False,
 
     results = []
     for i, cert in enumerate(certs, 1):
-        fpr = cert_sha256(cert, der)
+        fpr, nb, na = cert_meta(cert, der)
         issuer_path = resolve_issuer(cert, (by_ski, by_dn), der)
         status, detail = query_one(cert, timeout, der, sha256, issuer_path)
-        results.append((cert, fpr, status, detail))
+        results.append((cert, fpr, nb, na, status, detail))
         print_result(i, len(certs), cert, fpr, status, detail, issuer_path)
 
-    counter = Counter(s for _, _, s, _ in results)
+    counter = Counter(s for *_, s, _ in results)
     print("\n============ 批量完成 ============")
     print(f"共 {len(certs)} 张: " +
           " / ".join(f"{k} {counter.get(k, 0)}" for k in
                      sorted(set(counter) | _STATUS_OK,
                             key=lambda x: (x not in _STATUS_OK, x))))
 
-    failed = [(c, d) for c, _, s, d in results if s == "ERROR"]
+    failed = [(c, d) for c, *_, s, d in results if s == "ERROR"]
     if failed:
         print("查询失败:")
         for c, d in failed:
@@ -278,8 +302,8 @@ def main():
         description="批量跑 check_ocsp.py 查询证书 OCSP 状态")
     ap.add_argument("paths", nargs="*", help="证书文件或目录（可多个）")
     ap.add_argument("--csv", dest="csv_path", metavar="输出.csv",
-                    help="把结果写入 CSV 汇总表"
-                         "（cert/fingerprint_sha256/status/detail 四列）")
+                    help="把结果写入 CSV 汇总表（cert/fingerprint_sha256/"
+                         "not_before/not_after/status/detail 六列）")
     ap.add_argument("--timeout", type=int, default=15, help="每张证书超时秒数 (默认 15)")
     ap.add_argument("--der", action="store_true", help="证书按 DER 优先解析")
     ap.add_argument("--sha256", action="store_true",
