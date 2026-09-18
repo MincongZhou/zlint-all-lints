@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""run_all_fast.py —— 跑一遍 run_all.sh 的四步，但把第 ④ 步（OCSP 状态汇总）换成
+"""run_all_fast.py —— 跑一遍 run_all.sh 的五步，但把第 ④ 步（OCSP 状态汇总）换成
 「优先复用第 ① 步已存的 OCSP 响应」。
 
 本脚本位于项目根目录，`run_all.sh --fast`（`-fast` 亦可）会把整轮交给它；
@@ -72,7 +72,8 @@ from datetime import datetime, timedelta, timezone
 STEP_NAME = ["① 证书/CRL/OCSP 三类 zlint 规则（联网）",
              "② 证书字段宽表（本地）",
              "③ CRL 字段宽表（本地，依赖 ① 下载的 crl.pem）",
-             "④ OCSP 状态汇总（复用优先）"]
+             "④ OCSP 状态汇总（复用优先）",
+             "⑤ OCSP 响应字段宽表（本地，依赖 ① 保存的 resp.der）"]
 
 BANNER = "=" * 68
 
@@ -92,11 +93,14 @@ def resolve_project(explicit=None):
     return proj
 
 
-def run_step(n, argv, cwd):
-    """跑一个子步骤"""
-    print(f"\n{BANNER}\n[{n}/4] {STEP_NAME[n - 1]}\n{BANNER}")
+def run_step(seq, step_id, argv, cwd, total=5):
+    """跑一个子步骤。seq 是执行序号（[seq/total]），step_id 是步骤号（取标题用）"""
+    print(f"\n{BANNER}\n[{seq}/{total}] {STEP_NAME[step_id - 1]}\n{BANNER}")
     print("执行:", " ".join(argv))
     return subprocess.call(argv, cwd=cwd)
+
+
+
 
 
 def load_index(path):
@@ -249,7 +253,7 @@ def step4_ocsp(project, target, out, timeout=15, reuse=True,
 # ============================== ①②③（调用原项目脚本） ==============================
 
 def step_run(args):
-    """按选步策略跑四步"""
+    """按选步策略跑五步"""
     if len(args.rest) < 2:
         print(__doc__)
         sys.exit(2)
@@ -262,44 +266,49 @@ def step_run(args):
         sys.exit(f"输入路径不存在: {target}")
     os.makedirs(out, exist_ok=True)
 
-    run_map = {i: True for i in (1, 2, 3, 4)}
+    run_map = {i: True for i in (1, 2, 3, 4, 5)}
     if args.only:
         keep = set(int(x) for x in args.only.split(",") if x.strip())
-        run_map = {i: i in keep for i in (1, 2, 3, 4)}
+        run_map = {i: i in keep for i in (1, 2, 3, 4, 5)}
     if args.skip:
         drop = set(int(x) for x in args.skip.split(",") if x.strip())
         for i in drop:
             run_map[i] = False
 
+    total = sum(1 for v in run_map.values() if v)
+    seq = 0                      # 实际执行到第几步（用于 [n/total] 标号）
     py = sys.executable
     rc_all = 0
 
     # ---------- ① 证书 / CRL / OCSP 三类 zlint 规则 ----------
     if run_map[1]:
+        seq += 1
         argv = [py, os.path.join(project, "run_cert_crl_ocsp.py"),
                 target, out, "--timeout", str(timeout)]
         if args.detail:
             argv.append("--detail")
         if args.refresh_crl:
             argv.append("--refresh-crl")
-        rc = run_step(1, argv, project)
+        rc = run_step(seq, 1, argv, project, total)
         rc_all |= rc
 
     # ---------- ② 证书字段宽表 ----------
     if run_map[2]:
+        seq += 1
         argv = [py, os.path.join(project, "extract_CertInfo_python",
                                  "extract_cert_fields.py"),
                 target, "--csv", os.path.join(out, "cert_fields.csv"),
                 "--csv-mode", "wide"]
-        rc = run_step(2, argv, project)
+        rc = run_step(seq, 2, argv, project, total)
         rc_all |= rc
 
     # ---------- ③ CRL 字段宽表 ----------
     if run_map[3]:
+        seq += 1
         import glob as _glob
         crls = sorted(_glob.glob(os.path.join(out, "*", "crl.pem")))
         if not crls:
-            print(f"\n{BANNER}\n[3/4] {STEP_NAME[2]}\n{BANNER}")
+            print(f"\n{BANNER}\n[{seq}/{total}] {STEP_NAME[2]}\n{BANNER}")
             print("没找到 <输出目录>/*/crl.pem —— 跳过（属正常）")
         else:
             fd, listfile = tempfile.mkstemp(dir="/tmp", prefix="crl_paths.")
@@ -310,19 +319,41 @@ def step_run(args):
                     "--paths-from", listfile,
                     "--csv", os.path.join(out, "crl_fields.csv"),
                     "--csv-mode", "wide"]
-            rc = run_step(3, argv, project)
+            rc = run_step(seq, 3, argv, project, total)
             rc_all |= rc
             os.remove(listfile)
 
     # ---------- ④ OCSP 状态汇总（本工具的核心：复用优先） ----------
     if run_map[4]:
-        print(f"\n{BANNER}\n[4/4] {STEP_NAME[3]}\n{BANNER}")
+        seq += 1
+        print(f"\n{BANNER}\n[{seq}/{total}] {STEP_NAME[3]}\n{BANNER}")
         rc = step4_ocsp(project, target, out, timeout,
                         reuse=not args.no_reuse_ocsp,
                         max_age_hours=args.max_age_hours,
                         index_csv=args.index_csv,
                         evidence_dir=args.evidence_dir)
         rc_all |= rc
+
+    # ---------- ⑤ OCSP 响应字段宽表（本地解析 ① 存的 resp.der） ----------
+    if run_map[5]:
+        seq += 1
+        import glob as _glob
+        resps = sorted(_glob.glob(os.path.join(out, "*", "resp.der")))
+        if not resps:
+            print(f"\n{BANNER}\n[{seq}/{total}] {STEP_NAME[4]}\n{BANNER}")
+            print("没找到 <输出目录>/*/resp.der —— 跳过（属正常）")
+        else:
+            fd, listfile = tempfile.mkstemp(dir="/tmp", prefix="resp_paths.")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("\n".join(resps) + "\n")
+            argv = [py, os.path.join(project, "extract_CertInfo_python",
+                                     "extract_ocsp_fields.py"),
+                    "--paths-from", listfile,
+                    "--csv", os.path.join(out, "ocsp_fields.csv"),
+                    "--csv-mode", "wide"]
+            rc = run_step(seq, 5, argv, project, total)
+            rc_all |= rc
+            os.remove(listfile)
 
     print(f"\n结束: {datetime.now().strftime('%F %T')}")
     return rc_all

@@ -2,9 +2,10 @@
 
 证书 / CRL 字段提取与证书数据预处理的 Python 脚本集。
 
-- 运行时依赖：Python 3 + `cryptography >= 42.0`（`extract_cert_fields.py`、`extract_crl_fields.py` 启动时自动检查版本，不满足直接退出）
+- 运行时依赖：Python 3 + `cryptography >= 42.0`（`extract_cert_fields.py`、`extract_crl_fields.py`、`extract_ocsp_fields.py` 启动时自动检查版本，不满足直接退出）
 - 所有 CSV 输出为 UTF-8 with BOM，Excel 双击打开不乱码
-- 目录作为输入时递归查找对应扩展名：证书类脚本为 `.pem` / `.crt` / `.cer` / `.der`，CRL 脚本为 `.pem` / `.der` / `.crl`
+- 目录作为输入时递归查找对应扩展名：证书类脚本为 `.pem` / `.crt` / `.cer` / `.der`，CRL 脚本为 `.pem` / `.der` / `.crl`，
+  OCSP 脚本按文件名匹配（默认 `resp.der`，用 `--pattern` 改；直接给文件路径时不检查文件名）
 
 ## 脚本索引
 
@@ -12,6 +13,7 @@
 |---|---|---|---|
 | `extract_cert_fields.py` | 证书全字段提取 | 证书文件 / 目录 | 终端文本、JSON、CSV |
 | `extract_crl_fields.py` | CRL 吊销清单 + 全字段提取 | CRL 文件 / 目录 | 终端文本、JSON、CSV |
+| `extract_ocsp_fields.py` | OCSP 响应全字段提取（不联网） | OCSP 响应文件 / 目录 | 终端文本、JSON、CSV |
 | `preprocessed_csv.py` | SQL*Plus spool → 预处理 CSV | spool 文本 | CSV（可附带比对报告） |
 | `csv_b64_to_certs.py` | 预处理 CSV / JSONL → 证书仓库与证书文件 | 预处理 CSV 或 JSONL | JSONL、DER/PEM 文件、对照表 CSV |
 | `split_gm_certs.py` | 国密（SM2/SM3）证书筛选 | 证书目录或 JSONL | 子集 JSONL、文件名清单、对照表 CSV、证书文件 |
@@ -93,6 +95,61 @@ python3 extract_crl_fields.py                         # 无参数 → 交互模�
 | `entries` | 每条吊销记录一行，全字段（含失效日期、条目扩展） |
 | `wide` | 每个 CRL 一行（头部 + 扩展列），另输出副表 `<name>_entries.csv` |
 | `fields` | 每字段一行，列 `file,field,value`，字段零丢失 |
+
+---
+
+## extract_ocsp_fields.py
+
+把 responder 返回的原始 OCSP 响应（DER）解析成字段表，**纯本地、不联网**
+（联网查询是 `check_certs_python/check_ocsp.py` / `run_ocsp_batch.py` 的事，
+状态表 `ocsp_batch.csv` 由后者产出）。输入通常是 `run_all.sh` 第 ① 步存下的
+`<输出目录>/<证书名>/resp.der`。
+
+覆盖字段：响应级 `responseStatus` / `version`（从 DER 解析，缺省 v1）/ `producedAt` /
+`responderID`（ByName→DN，ByKey→keyHash）/ 响应扩展（nonce、CRL References…）/ 内嵌证书；
+单条响应 `certStatus` / CertID（hashAlg + issuerNameHash + issuerKeyHash + serialNumber）/
+`thisUpdate` / `nextUpdate` / `revocationTime` / `revocationReason`；签名侧
+`signatureAlgorithm` / 签名长度 / `tbsResponseData` 的 SHA-256。
+
+```bash
+python3 extract_ocsp_fields.py resp.der                      # 终端打印全字段
+python3 extract_ocsp_fields.py resp.der --json               # JSON
+python3 extract_ocsp_fields.py results/CT --csv ocsp_fields.csv            # 宽表 + 副表
+python3 extract_ocsp_fields.py results/CT --csv r.csv --csv-mode responses # 每条 SingleResponse 一行
+python3 extract_ocsp_fields.py --paths-from list.txt --csv ocsp_fields.csv # 上万份走列表文件
+python3 extract_ocsp_fields.py resp.der --issuer ca.pem      # 验签 + CA 是否给对
+python3 extract_ocsp_fields.py                               # 无参数 → 交互模式
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--csv` | 输出 CSV |
+| `--csv-mode` | `wide`（默认）/ `responses` / `fields` |
+| `--pattern` | 目录递归时匹配的文件名，默认 `resp.der` |
+| `--paths-from` | 从列表文件读路径（`-` 表示 stdin） |
+| `--issuer` | 验签用证书：优先用响应内嵌的 responder 证书公钥，没有才用它 |
+| `--no-ext-columns` | `wide` 模式下只输出固定列 |
+| `--full` / `--json` | 终端全字段 / JSON 输出 |
+
+`--csv-mode` 取值：
+
+| 模式 | 结构 |
+|---|---|
+| `wide`（默认） | 每份响应一行（固定列 + 响应扩展列），另输出副表 `<name>_responses.csv` |
+| `responses` | 每个 SingleResponse 一行（一份响应含多条时用） |
+| `fields` | 每字段一行，列 `file,field,value`，字段零丢失 |
+
+注意：
+
+- **非 SUCCESSFUL 的响应**（`unauthorized` / `tryLater` / `malformedRequest` …）没有
+  `tbsResponseData`，签名与单条响应字段一律留空，只有 `response_status` 有值；
+  这类行不会被当成"解析失败"（`run_all_fast.py` 复用时也遵循同一口径）
+- 宽表带 `cert_stem` 列（= `resp.der` 所在目录名 = `index.csv` 的 `cert` 列），
+  可与 `cert_fields.csv` / `ocsp_batch.csv` 直接 join
+- 同一 responder 的响应会被每张证书各存一份，统计前按 `response_sha256` /
+  `tbs_sha256` 去重（改签会变整体指纹，看 `tbs_sha256` 更稳）
+- 验签：OCSP 响应只带签名不带公钥，有内嵌 responder 证书（delegated）时用它，
+  否则用 `--issuer`；`issuer_dn_match=False` 表示 `--issuer` 不是该 responder 证书的签发者
 
 `wide` 模式不把吊销条目合并进单元格（大 CA 的 CRL 可达数万条，会超出 Excel 单元格 32767 字符上限），逐条信息在 `*_entries.csv` 中；主表只保留吊销条数。
 

@@ -285,16 +285,18 @@ python3 run_cert_crl_ocsp.py certs/ /tmp/three --refresh-crl
 - OCSP **无法**这样去重：请求带 CertID（签发者哈希 + 序列号），一次只能查一张证书，
   请求数等于证书数；要提速只能并发（当前为逐张串行）
 
-### 3.5 一键跑齐四步（`run_all.sh`）
+### 3.5 一键跑齐五步（`run_all.sh`）
 
 把 3.1–3.4 串成一条命令，产物统一落到同一个输出目录；其中 CRL 字段步直接复用
-三类规则步下载到本地的 `crl.pem`，不必自己拼通配符参数：
+三类规则步下载到本地的 `crl.pem`，OCSP 响应字段步复用它保存的 `resp.der`，
+都不必自己拼通配符参数：
 
 ```bash
 ./run_all.sh <证书文件|证书目录> [输出目录] [超时秒数] [选步参数...]
 
-./run_all.sh "certs/CFCA_CA证书" results/CFCA_CA 15              # 四步全跑
+./run_all.sh "certs/CFCA_CA证书" results/CFCA_CA 15              # 五步全跑
 ./run_all.sh "certs/CFCA订户证书" results/x 10 --only 2,4         # 只跑 2) 证书字段 + 4) OCSP 状态
+./run_all.sh "certs/CFCA订户证书" results/x 10 --only 5           # 只把已有的 resp.der 解析成字段表
 ./run_all.sh "certs/CFCA订户证书" results/x 10 --skip 1,3         # 跳过 1) 三类规则、3) CRL 字段
 ./run_all.sh "certs/CFCA订户证书" results/x 10 --no-lint          # 等价 --skip 1（最省时）
 ./run_all.sh certs/ --out results/all --timeout 15 --refresh-crl  # 选项写法：强制重下 CRL
@@ -302,12 +304,14 @@ python3 run_cert_crl_ocsp.py certs/ /tmp/three --refresh-crl
 ./run_all.sh -h                                                  # 帮助
 ```
 
-> 步骤号是 `run_all.sh` 自己的编号（`1` 三类规则 / `2` 证书字段 / `3` CRL 字段 / `4` OCSP 状态），
-> 与上面 3.1–3.4 的排列顺序**不同**（脚本把最慢的联网 lint 放在了第 1 步）。
+> 步骤号是 `run_all.sh` 自己的编号（`1` 三类规则 / `2` 证书字段 / `3` CRL 字段 /
+> `4` OCSP 状态 / `5` OCSP 响应字段），与上面 3.1–3.4 的排列顺序**不同**
+> （脚本把最慢的联网 lint 放在了第 1 步）。第 5 步与第 3 步一样是纯本地解析，
+> 输入分别是第 1 步存下的 `resp.der` 与 `crl.pem`。
 
 | 选步参数 | 含义 |
 |---|---|
-| `--only <步骤>` | 只跑列出的步骤。步骤号：`1` 证书/CRL/OCSP 三类 lint、`2` 证书字段、`3` CRL 字段、`4` OCSP 状态 |
+| `--only <步骤>` | 只跑列出的步骤。步骤号：`1` 证书/CRL/OCSP 三类 lint、`2` 证书字段、`3` CRL 字段、`4` OCSP 状态、`5` OCSP 响应字段 |
 | `--skip <步骤>` | 跳过列出的步骤（`--no-lint` 等价 `--skip 1`）；`--skip` 优先级高于 `--only` |
 
 其它选项：
@@ -363,7 +367,7 @@ python3 run_all_fast.py "certs/CFCA订户证书" results/x 15     # 等价的直
 
 `--fast` **不改变跑哪些步骤**：`--only / --skip / --no-lint` 完全照旧生效并透传，
 参数校验也仍在 `run_all.sh` 里先完成（例如 `--only 1 --no-lint --fast` 依旧报
-「四步都被跳过」、退出码 2，与不加 `--fast` 一致）。只有真正要跑第 4 步时它才有意义。
+「五步都被跳过」、退出码 2，与不加 `--fast` 一致）。只有真正要跑第 4 步时它才有意义。
 
 约定与注意：
 
@@ -374,6 +378,11 @@ python3 run_all_fast.py "certs/CFCA订户证书" results/x 15     # 等价的直
 - **CRL 字段步依赖三类规则步**：跳过后者时，输出目录里**已有的** `<证书名>/crl.pem`
   仍会被解析；跑了后者时每张证书会先清掉自己目录里上一轮的 `crl.pem`，只留本轮证据，
   因此不会解析到陈旧 CRL
+- **OCSP 响应字段步（第 5 步）同理**：输入是第 1 步存下的 `<证书名>/resp.der`，本地解析、
+  不联网，产物 `ocsp_fields.csv`（每份响应一行）+ `ocsp_fields_responses.csv`
+  （每条 SingleResponse 一行）。同一 responder 的响应会被每张证书各存一份，统计前按
+  `tbs_sha256` / `response_sha256` 去重；`response_status` 非 SUCCESSFUL 的行没有
+  签名与状态字段（属正常，不是解析失败）
 - 跳过三类规则步则不生成 `ca_summary.csv` / `crl_summary.csv` / `ocsp_summary.csv` / `index.csv`
   （输出目录里若已有上轮的这些文件会原样留着，不算本次产物）
 - 单张证书也会强制 `--csv-mode wide`，保证与目录输入的表结构一致（一张证书也占一行）
@@ -471,12 +480,15 @@ CSV（含 `ca_summary.csv` / `crl_summary.csv` / `ocsp_summary.csv` 三张汇总
 | CRL 验签 | `python3 extract_CertInfo_python/extract_crl_fields.py <crl> --issuer ca.pem` |
 | 批量 OCSP 状态 | `python3 run_ocsp_batch.py <目录> --csv out.csv --timeout 10` |
 | 三类规则一起跑 | `python3 run_cert_crl_ocsp.py <证书\|目录> <输出目录> [--detail] [--refresh-crl]` |
-| 一键跑齐四件套 | `./run_all.sh <证书\|目录> [输出目录] [超时秒数] [选步参数]` |
+| 一键跑齐五步 | `./run_all.sh <证书\|目录> [输出目录] [超时秒数] [选步参数]` |
 | 只跑证书字段 + OCSP 状态 | `./run_all.sh <证书\|目录> <输出目录> 15 --only 2,4` |
 | 跳过三类 lint（最省时） | `./run_all.sh <证书\|目录> <输出目录> 15 --no-lint` |
 | 强制重下 CRL（忽略缓存） | `./run_all.sh <证书\|目录> <输出目录> --refresh-crl` |
 | CRL 批量（路径列表文件） | `python3 extract_CertInfo_python/extract_crl_fields.py --paths-from list.txt --csv out.csv --csv-mode wide` |
 | 单张 OCSP 查询 | `python3 check_certs_python/check_ocsp.py <证书> [签发者证书] --status` |
+| OCSP 响应全字段 | `python3 extract_CertInfo_python/extract_ocsp_fields.py <resp.der>` |
+| OCSP 响应批量宽表 | `python3 extract_CertInfo_python/extract_ocsp_fields.py <目录> --csv out.csv --csv-mode wide` |
+| OCSP 响应验签 | `python3 extract_CertInfo_python/extract_ocsp_fields.py <resp.der> --issuer ca.pem` |
 | 单张 OCSP + 签发者目录 | `python3 check_certs_python/check_ocsp.py <证书> --issuer-dir <目录> --status` |
 | 单张 CRL 下载 | `python3 check_certs_python/check_crl.py <证书> --out crl.pem` |
 | CRL / OCSP 一致性核验 | `python3 check_certs_python/check_revocation_consistency.py <证书\|目录> [--csv 结果.csv]` |
